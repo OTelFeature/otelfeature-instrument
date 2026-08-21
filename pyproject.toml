@@ -1,0 +1,28 @@
+[project]
+name = "otelfeature-instrument"
+version = "0.1.0"
+description = "Zero-code OpenTelemetry launcher with live, flagd-controlled internal-span suppression"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "openfeature-provider-flagd==0.5.2",
+    "openfeature-sdk==0.10.0",
+    "opentelemetry-api==1.44.0",
+    "opentelemetry-exporter-otlp-proto-http==1.44.0",
+    "opentelemetry-instrumentation==0.65b0",
+    "opentelemetry-sdk==1.44.0",
+]
+
+[project.scripts]
+otelfeature-instrument = "otelfeature_instrument.cli:run"
+
+[dependency-groups]
+dev = ["pytest==8.4.2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/otelfeature_instrument"]
