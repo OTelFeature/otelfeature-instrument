@@ -23,6 +23,7 @@ from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import EventDetails, ProviderEvent
 from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
 
+from otelfeature_instrument import flags
 from otelfeature_instrument.flags import (
     _RECLASSIFY_ON,
     TRACE_VERBOSITY_FLAG_KEY,
@@ -333,3 +334,78 @@ def test_real_flagd_classifies_on_handler_registration(flagd_provider):
         assert _wait_for(lambda: resolver.cached == VERBOSITY_FULL)
     finally:
         feature_api.remove_handler(ProviderEvent.PROVIDER_READY, resolver.classify)
+
+
+# --------------------------------------------------------------------------
+# configure_feature_flags() itself
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def registered_handlers(monkeypatch: pytest.MonkeyPatch):
+    """Captures handler registration instead of touching the real event bus.
+
+    `configure_feature_flags()` registers on the process-wide OpenFeature bus,
+    which would outlive the test; it also latches `_handlers_registered`, which
+    has to start false for each case.
+    """
+    captured: list[tuple[ProviderEvent, object]] = []
+    monkeypatch.setattr(flags, "_handlers_registered", False)
+    monkeypatch.setattr(
+        feature_api, "add_handler", lambda event, handler: captured.append((event, handler))
+    )
+    return captured
+
+
+def test_configure_registers_handlers_and_an_in_process_flagd_provider(
+    monkeypatch: pytest.MonkeyPatch, registered_handlers
+):
+    monkeypatch.delenv(flags.FLAG_PROVIDER_ENV_VAR, raising=False)
+    providers: list[object] = []
+    monkeypatch.setattr(feature_api, "set_provider", providers.append)
+    monkeypatch.setattr(flags, "FlagdProvider", lambda **kwargs: ("flagd", kwargs))
+
+    flags.configure_feature_flags()
+
+    assert [event for event, _ in registered_handlers] == list(flags._RECLASSIFY_ON)
+    assert all(handler == flags._resolver.classify for _, handler in registered_handlers)
+    # in-process, not rpc: it is what delivers the configuration-changed events
+    # the classification depends on.
+    assert providers == [("flagd", {"resolver_type": ResolverType.IN_PROCESS})]
+
+
+def test_configure_with_provider_none_still_registers_handlers(
+    monkeypatch: pytest.MonkeyPatch, registered_handlers
+):
+    """The app owns OpenFeature, but its events still have to drive the cache."""
+    monkeypatch.setenv(flags.FLAG_PROVIDER_ENV_VAR, "none")
+    monkeypatch.setattr(
+        feature_api, "set_provider", lambda provider: pytest.fail("must not register a provider")
+    )
+
+    flags.configure_feature_flags()
+
+    assert [event for event, _ in registered_handlers] == list(flags._RECLASSIFY_ON)
+
+
+def test_configure_rejects_an_unknown_provider(
+    monkeypatch: pytest.MonkeyPatch, registered_handlers
+):
+    monkeypatch.setenv(flags.FLAG_PROVIDER_ENV_VAR, "launchdarkly")
+
+    with pytest.raises(ValueError, match="OTELFEATURE_FLAG_PROVIDER"):
+        flags.configure_feature_flags()
+
+    assert registered_handlers == []
+
+
+def test_configure_twice_registers_handlers_once(
+    monkeypatch: pytest.MonkeyPatch, registered_handlers
+):
+    """Otherwise every provider event would classify twice over."""
+    monkeypatch.setenv(flags.FLAG_PROVIDER_ENV_VAR, "none")
+
+    flags.configure_feature_flags()
+    flags.configure_feature_flags()
+
+    assert len(registered_handlers) == len(flags._RECLASSIFY_ON)

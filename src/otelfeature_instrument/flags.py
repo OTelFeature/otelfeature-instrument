@@ -10,42 +10,11 @@ over OpenFeature configuration on its own terms (at any point - the resolver
 below always reads the *current* global provider, not a snapshot taken at
 startup).
 
-## Evaluating once vs. evaluating always
-
-`telemetryLevel` sits on the hot path: every span asks for it. Most of the
-time the answer cannot have changed since the last span, because the flag has
-no targeting rules - it's one `defaultVariant` for the whole world. flagd says
-exactly that, in the resolution `reason`:
-
-| `reason`          | flagd produced it because                        | same for every span? |
-|-------------------|--------------------------------------------------|----------------------|
-| `STATIC`          | flag has no `targeting`, served `defaultVariant`  | yes                  |
-| `TARGETING_MATCH` | `targeting` rules ran and picked a variant        | no                   |
-| `DEFAULT`         | `targeting` rules ran and matched nothing         | no                   |
-| `DISABLED`        | flag `state` is `DISABLED`, served our default    | not worth assuming   |
-| `ERROR`           | flag missing, provider not ready, ...             | not yet knowable     |
-
-So the flag is evaluated **once, in the provider event handler, without an
-evaluation context**, purely to read the reason back. `STATIC` and only
-`STATIC` is kept; anything else means the value can depend on who's asking,
-and every span has to evaluate for itself.
-
-That classification is redone on every `PROVIDER_CONFIGURATION_CHANGED`, so
-attaching a `targeting` block to `telemetryLevel` makes the next probe report
-`TARGETING_MATCH`/`DEFAULT`, caching switches itself off, and spans start
-being evaluated individually. Take the targeting away again and caching
-resumes by itself. No configuration, no restart, no code change on our side.
-
-The event handler is also what makes caching *safe*: flagd's in-process
-resolver pushes a changed ruleset over its gRPC sync stream, the SDK emits the
-event, and the cached answer is replaced. Combined with in-process resolution,
-the steady-state cost of "is telemetry suppressed?" is one attribute read, and
-a flag edit still takes effect on the very next span.
-
-Note that the SDK dispatches event handlers on its own executor rather than
-inline, so classification lands shortly *after* the provider becomes ready.
-Spans created in that window fall through to a direct evaluation - the right
-answer, just not yet the cheap one.
+`telemetryLevel` is evaluated once while the flag is static and per span once
+it carries targeting, with the classification redone on provider events. See
+"Evaluating once, or evaluating always" in the README for what each resolution
+reason implies and why keeping an answer is safe; the comments below cover the
+local decisions only.
 """
 
 from __future__ import annotations
@@ -88,8 +57,8 @@ class _VerbosityResolver:
         # `None` means "not cacheable, evaluate per span". A plain attribute
         # rather than a lock: it's written by the provider's event thread and
         # read by every span, and a torn read is not possible - the worst a
-        # race can do is serve the previous answer for one more span, which a
-        # 5-second OFREP poll did for 5 seconds.
+        # race can do is serve the previous classification for one more span,
+        # which the next event corrects.
         self._cached: str | None = None
 
     @property
@@ -114,7 +83,7 @@ class _VerbosityResolver:
         # Deliberately `STATIC` only. TARGETING_MATCH and DEFAULT both mean a
         # targeting block ran, so the answer belongs to one evaluation context
         # and not to the process; DISABLED and ERROR are not worth betting on.
-        self._cached = value if str(reason) == Reason.STATIC else None
+        self._cached = value if reason == Reason.STATIC else None
 
         if self._cached != previous:
             if self._cached is None:
@@ -143,7 +112,8 @@ class _VerbosityResolver:
 
     def _evaluate(self, context: EvaluationContext | None = None) -> tuple[str, object]:
         # Always reads the live global provider rather than something captured
-        # at configure_feature_flags() time - see the module docstring.
+        # at configure_feature_flags() time, so an app that registers its own
+        # provider later is picked up without restarting anything.
         details = feature_api.get_client().get_string_details(
             TRACE_VERBOSITY_FLAG_KEY, VERBOSITY_FULL, context
         )
@@ -151,6 +121,7 @@ class _VerbosityResolver:
 
 
 _resolver = _VerbosityResolver()
+_handlers_registered = False
 
 
 def configure_feature_flags() -> None:
@@ -175,6 +146,13 @@ def configure_feature_flags() -> None:
 
 
 def _register_event_handlers() -> None:
+    # add_handler() appends blindly, so a second configure_feature_flags()
+    # would classify twice per event: same outcome, twice the evaluations.
+    global _handlers_registered
+    if _handlers_registered:
+        return
+    _handlers_registered = True
+
     for event in _RECLASSIFY_ON:
         # The SDK runs a handler immediately if the provider is already in the
         # matching state (see openfeature/_event_support.py), so registering
