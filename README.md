@@ -100,10 +100,45 @@ POST /geocode      (SERVER)
 [flagd](https://flagd.dev/) OpenFeature provider in
 ["in-process" resolver mode](https://flagd.dev/reference/specifications/in-process-providers/):
 the flag ruleset is synced from flagd once (and kept updated in the
-background over a gRPC stream) and evaluated in memory on every span - no
-network call on the per-span hot path. Editing the flag in flagd takes
-effect on the very next span, with no restart of the instrumented
-application.
+background over a gRPC stream) and evaluated in memory - no network call on
+the per-span hot path. Editing the flag in flagd takes effect on the very
+next span, with no restart of the instrumented application.
+
+### Evaluating once, or evaluating always
+
+`telemetryLevel` is asked about on every single span, but most of the time
+the answer cannot have changed since the last one: a flag with no `targeting`
+block is one `defaultVariant` for the whole world. flagd says so in the
+resolution `reason`, and that reason is the entire mechanism:
+
+| `reason`          | flagd produced it because                        | same for every span? |
+|-------------------|--------------------------------------------------|----------------------|
+| `STATIC`          | flag has no `targeting`, served `defaultVariant`  | yes                  |
+| `TARGETING_MATCH` | `targeting` rules ran and picked a variant        | no                   |
+| `DEFAULT`         | `targeting` rules ran and matched nothing         | no                   |
+| `DISABLED`        | flag `state` is `DISABLED`, served our default    | not worth assuming   |
+| `ERROR`           | flag missing, provider not ready, ...             | not yet knowable     |
+
+So the flag is evaluated **once, from the provider's event handler, without
+an evaluation context**, purely to read the reason back:
+
+- `STATIC` - and only `STATIC` - is kept. Every subsequent span is answered
+  from memory, evaluating nothing and running no hooks.
+- Anything else means the value can depend on who's asking, so every span
+  evaluates for itself.
+
+That classification is redone on every `PROVIDER_CONFIGURATION_CHANGED`, so
+attaching a `targeting` block to `telemetryLevel` in flagd makes the next
+probe report `TARGETING_MATCH`, caching switches itself off, and spans start
+being evaluated individually. Remove the targeting and caching resumes by
+itself. No configuration, no restart, no code change here.
+
+The event handler is what makes caching safe in the first place: flagd's
+in-process resolver pushes a changed ruleset over its gRPC sync stream, the
+SDK emits the event, and the kept answer is replaced - which is why the
+`rpc`/OFREP resolvers would not do. Handlers run on the SDK's own executor,
+so for a brief moment after startup spans fall through to a direct
+evaluation: the right answer, just not yet the cheap one.
 
 ## Configuration
 
