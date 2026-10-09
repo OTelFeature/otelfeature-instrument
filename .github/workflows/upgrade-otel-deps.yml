@@ -28,7 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      # NOTE: astral-sh/setup-uv publishes no major moving tags beyond v7,
+      # so pin the full version (Dependabot's github-actions updater bumps it).
+      - uses: astral-sh/setup-uv@v10.2.0
 
       - name: Upgrade the opentelemetry-* family
         run: |
