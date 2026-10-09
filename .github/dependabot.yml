@@ -15,6 +15,19 @@ updates:
       - "dependencies"
       - "python"
     groups:
+      # OTel Python packages release in lockstep and constrain each other to
+      # the same minor version (e.g. sdk>=1.44.0,<1.45.dev0), and we pin them
+      # exactly — updating any single one is unsatisfiable. They must be
+      # grouped so they bump together in one PR. Keep this group listed FIRST:
+      # the first matching group wins.
+      opentelemetry:
+        applies-to: version-updates
+        patterns: ["opentelemetry-*"]
+      # Same lockstep constraint applies if a security release drops for one
+      # of them — grouped separately so they can't be pulled out individually.
+      opentelemetry-security:
+        applies-to: security-updates
+        patterns: ["opentelemetry-*"]
       # Group all security advisories into a single PR
       security-patches:
         applies-to: security-updates
@@ -30,25 +43,28 @@ updates:
       prefix: "deps"
       include: "scope"
 
-  # GitHub Actions used in CI workflows (future-proofing)
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "github-actions"
-    groups:
-      security-patches:
-        applies-to: security-updates
-        patterns: ["*"]
-      minor-and-patch:
-        applies-to: version-updates
-        update-types:
-          - "minor"
-          - "patch"
-    commit-message:
-      prefix: "ci"
-      include: "scope"
+  # NOTE: the github-actions updater was removed because this repo has no
+  # .github/workflows yet — Dependabot errored on every run with
+  # "couldn't find a <anything>.yml". Re-add this block once CI workflows exist:
+  #
+  # - package-ecosystem: "github-actions"
+  #   directory: "/"
+  #   schedule:
+  #     interval: "weekly"
+  #     day: "monday"
+  #   open-pull-requests-limit: 5
+  #   labels:
+  #     - "dependencies"
+  #     - "github-actions"
+  #   groups:
+  #     security-patches:
+  #       applies-to: security-updates
+  #       patterns: ["*"]
+  #     minor-and-patch:
+  #       applies-to: version-updates
+  #       update-types:
+  #         - "minor"
+  #         - "patch"
+  #   commit-message:
+  #     prefix: "ci"
+  #     include: "scope"
