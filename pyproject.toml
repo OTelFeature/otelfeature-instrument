@@ -8,10 +8,15 @@ requires-python = ">=3.10"
 dependencies = [
     "openfeature-provider-flagd==0.5.2",
     "openfeature-sdk==0.10.0",
-    "opentelemetry-api==1.44.0",
-    "opentelemetry-exporter-otlp-proto-http==1.44.0",
-    "opentelemetry-instrumentation==0.65b0",
-    "opentelemetry-sdk==1.44.0",
+    # NOTE: opentelemetry-* packages release in lockstep and constrain each
+    # other to the same minor version, so they can't be exact-pinned
+    # (Dependabot would fail on any single-package update — see
+    # https://github.com/dependabot/dependabot-core/issues/16390).
+    # uv.lock still pins exact versions for reproducible installs.
+    "opentelemetry-api>=1.44.0,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0,<2",
+    "opentelemetry-instrumentation>=0.65b0,<1",
+    "opentelemetry-sdk>=1.44.0,<2",
 ]
 
 [project.scripts]
