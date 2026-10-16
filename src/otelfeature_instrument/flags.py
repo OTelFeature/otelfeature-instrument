@@ -27,6 +27,7 @@ local decisions only.
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass
 from logging import getLogger
 from typing import Mapping
@@ -53,7 +54,6 @@ VERBOSITY_OFF = "OFF"
 # The on-stage kill switch. `false` means exactly what `telemetryLevel=OFF`
 # means; it exists so the switch can be a plain boolean.
 OTEL_ENABLED_FLAG_KEY = "otelEnabled"
-
 
 
 @dataclass(frozen=True)
@@ -102,13 +102,16 @@ class _CachingResolver:
         # error, wrong type) - the field's startup fallback, never a constant.
         self.default = default
         # Last error code reported, so a broken flag is logged once when it
-        # breaks and once when it recovers, not on every span.
+        # breaks and once when it recovers, not on every span. Span threads
+        # and the event thread both report; the lock is only taken when the
+        # code changes, so the steady state stays lock-free.
         self._reported_error: object | None = None
-        # `None` means "not cacheable, evaluate per span". A plain attribute
-        # rather than a lock: it's written by the provider's event thread and
-        # read by every span, and a torn read is not possible - the worst a
-        # race can do is serve the previous classification for one more span,
-        # which the next event corrects. Flag values are never `None`
+        self._report_lock = threading.Lock()
+        # `None` means "not cacheable, evaluate per span". Read lock-free by
+        # every span; written only from `classify()`, which `_PolicySource`
+        # serialises - the SDK runs event handlers on a thread pool, and two
+        # interleaved classifications could otherwise leave the older answer
+        # cached until the next event. Flag values are never `None`
         # themselves, so a cached `False` is still a cached answer.
         self._cached: object | None = None
 
@@ -142,7 +145,8 @@ class _CachingResolver:
         cacheable = reason == Reason.STATIC or details.error_code == ErrorCode.FLAG_NOT_FOUND
         self._cached = value if cacheable else None
 
-        if self._cached != previous:
+        # A missing flag was already logged by `_report()`.
+        if self._cached != previous and details.error_code != ErrorCode.FLAG_NOT_FOUND:
             if self._cached is None:
                 _logger.info(
                     "otelfeature-instrument: %s resolves with reason=%s - "
@@ -181,9 +185,17 @@ class _CachingResolver:
         error = details.error_code
         if error == self._reported_error:
             return
-        self._reported_error = error
+        with self._report_lock:
+            previous = self._reported_error
+            if error == previous:
+                return
+            self._reported_error = error
         if error is None:
-            _logger.info("otelfeature-instrument: %s readable again", self.flag_key)
+            _logger.info(
+                "otelfeature-instrument: %s %s",
+                self.flag_key,
+                "is now defined" if previous == ErrorCode.FLAG_NOT_FOUND else "readable again",
+            )
         elif error == ErrorCode.FLAG_NOT_FOUND:
             # The normal state of a deployment that never defined the flag.
             _logger.info(
@@ -215,12 +227,26 @@ class _VerbosityResolver(_CachingResolver):
 
     def __init__(self, default: str = VERBOSITY_FULL) -> None:
         super().__init__(default)
+        self._reported_unknown: str | None = None
 
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
         return client.get_string_details(self.flag_key, self.default, context)
 
     def _normalise(self, value) -> str:
-        return (value or self.default).strip().upper()
+        level = (value or self.default).strip().upper()
+        if level not in _KNOWN_LEVELS and level != self._reported_unknown:
+            # Logged once per unknown value; a benign race may log it twice.
+            self._reported_unknown = level
+            _logger.warning(
+                "otelfeature-instrument: %s has unknown variant %r - "
+                "falling back to the startup value",
+                self.flag_key,
+                level,
+            )
+        return level
+
+
+_KNOWN_LEVELS = frozenset({VERBOSITY_FULL, VERBOSITY_IO, VERBOSITY_OFF})
 
 
 class _EnabledResolver(_CachingResolver):
@@ -253,36 +279,52 @@ class _PolicySource:
         # input flag is cached, so the static path stays one attribute read
         # and allocates nothing.
         self._cached: TelemetryPolicy | None = None
+        self._classify_lock = threading.Lock()
+        # Disabled is disabled: nothing else in the policy matters then.
+        self._disabled = TelemetryPolicy(
+            enabled=False, suppress_internal=self.defaults.suppress_internal
+        )
 
     @property
     def cached(self) -> TelemetryPolicy | None:
         return self._cached
 
     def classify(self, details: EventDetails | None = None) -> None:
-        """Registered as an OpenFeature event handler - see `_RECLASSIFY_ON`."""
-        self.enabled.classify(details)
-        self.level.classify(details)
-        enabled, level = self.enabled.cached, self.level.cached
-        self._cached = (
-            None if enabled is None or level is None else self._combine(enabled, level)
-        )
+        """Registered as an OpenFeature event handler - see `_RECLASSIFY_ON`.
+
+        Serialised: the SDK dispatches events on a thread pool, and the last
+        classification to *start* must be the one that ends up cached.
+        """
+        with self._classify_lock:
+            self.enabled.classify(details)
+            self.level.classify(details)
+            enabled, level = self.enabled.cached, self.level.cached
+            self._cached = (
+                None if enabled is None or level is None else self._combine(enabled, level)
+            )
 
     def current(self, context: EvaluationContext | None = None) -> TelemetryPolicy:
         cached = self._cached
         if cached is not None:
             return cached
-        return self._combine(self.enabled.current(context), self.level.current(context))
+        enabled = self.enabled.current(context)
+        if not enabled:
+            # As before the refactor: with tracing off, `telemetryLevel` is
+            # not evaluated at all.
+            return self._disabled
+        return self._combine(enabled, self.level.current(context))
 
     def _combine(self, enabled: bool, level: str) -> TelemetryPolicy:
+        if not enabled or level == VERBOSITY_OFF:
+            return self._disabled
         # An unknown `telemetryLevel` variant is no answer at all, so the
-        # field keeps its startup fallback - fail open, as before.
+        # field keeps its startup fallback - fail open, as before. (The
+        # resolver's own default covers a *missing* flag; this covers a
+        # defined flag with a value nobody knows.)
         suppress_internal = {VERBOSITY_FULL: False, VERBOSITY_IO: True}.get(
             level, self.defaults.suppress_internal
         )
-        return TelemetryPolicy(
-            enabled=enabled and level != VERBOSITY_OFF,
-            suppress_internal=suppress_internal,
-        )
+        return TelemetryPolicy(enabled=True, suppress_internal=suppress_internal)
 
 
 # Captured at import, which is process startup: this module is imported from

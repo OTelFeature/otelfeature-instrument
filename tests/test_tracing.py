@@ -208,3 +208,37 @@ def test_suppressed_span_restores_context_when_the_body_raises():
                 raise RuntimeError("boom")
 
     assert trace.get_current_span() is before
+
+
+
+@pytest.mark.parametrize(
+    "enabled, level, exported",
+    [
+        (True, "FULL", {"server", "internal", "client", "producer", "consumer"}),
+        (True, "IO", {"server", "client", "producer", "consumer"}),
+        (True, "OFF", set()),
+        (False, "FULL", set()),
+    ],
+)
+def test_real_policy_source_drives_the_tracer(monkeypatch, enabled, level, exported):
+    """No patched policy: flag values go through the real `current_policy()`."""
+    from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
+
+    from otelfeature_instrument import flags
+
+    values = {"otelEnabled": enabled, "telemetryLevel": level}
+
+    class _Client:
+        def _get(self, key, default_value, context=None):
+            return FlagEvaluationDetails(flag_key=key, value=values[key], reason=Reason.STATIC)
+
+        get_string_details = get_boolean_details = _get
+
+    monkeypatch.setattr(flags, "_policy_source", _PolicySource())
+    monkeypatch.setattr(feature_api, "get_client", lambda: _Client())
+    flags._policy_source.classify()
+    exporter = InMemorySpanExporter()
+
+    _all_kinds(_wrapped_tracer(exporter))
+
+    assert {span.name for span in exporter.get_finished_spans()} == exported

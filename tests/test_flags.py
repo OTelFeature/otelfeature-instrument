@@ -11,6 +11,7 @@ than an assumption.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -649,7 +650,7 @@ class _FlagClient:
         (True, VERBOSITY_IO, TelemetryPolicy(enabled=True, suppress_internal=True)),
         (True, VERBOSITY_OFF, TelemetryPolicy(enabled=False, suppress_internal=False)),
         (False, VERBOSITY_FULL, TelemetryPolicy(enabled=False, suppress_internal=False)),
-        (False, VERBOSITY_IO, TelemetryPolicy(enabled=False, suppress_internal=True)),
+        (False, VERBOSITY_IO, TelemetryPolicy(enabled=False, suppress_internal=False)),
         (True, "VERBOSE", TelemetryPolicy(enabled=True, suppress_internal=False)),
     ],
 )
@@ -777,3 +778,113 @@ def test_a_missing_flag_is_logged_once_at_info(caplog):
         TRACE_VERBOSITY_FLAG_KEY,
     ]
     assert {r.levelname for r in not_defined} == {"INFO"}
+
+
+
+def test_disabled_does_not_evaluate_telemetry_level():
+    """As before the refactor: with otelEnabled=false the level is never asked."""
+    client = _FlagClient(
+        otelEnabled=(False, Reason.TARGETING_MATCH),
+        telemetryLevel=(VERBOSITY_IO, Reason.TARGETING_MATCH),
+    )
+    asked: list[str] = []
+    original = client._get
+
+    def spy(key, default_value, context=None):
+        asked.append(key)
+        return original(key, default_value, context)
+
+    client.get_string_details = client.get_boolean_details = spy
+    source = _PolicySource()
+
+    with patch.object(feature_api, "get_client", return_value=client):
+        assert source.current().enabled is False
+
+    assert asked == [OTEL_ENABLED_FLAG_KEY]
+
+
+def test_a_change_to_one_flag_updates_the_cached_policy():
+    client = _FlagClient(
+        otelEnabled=(True, Reason.STATIC), telemetryLevel=(VERBOSITY_FULL, Reason.STATIC)
+    )
+    source = _PolicySource()
+
+    with patch.object(feature_api, "get_client", return_value=client):
+        source.classify(EventDetails())
+        client.flags[TRACE_VERBOSITY_FLAG_KEY] = (VERBOSITY_IO, Reason.STATIC)
+        source.classify(EventDetails(flags_changed=[TRACE_VERBOSITY_FLAG_KEY]))
+
+    assert source.cached == TelemetryPolicy(enabled=True, suppress_internal=True)
+
+
+def test_concurrent_classifications_leave_the_latest_answer_cached():
+    """Event handlers run on a thread pool. An older classification finishing
+    last must not overwrite a newer one."""
+    first_evaluation = threading.Event()
+    release = threading.Event()
+
+    class _Client(_FlagClient):
+        def get_string_details(self, key, default_value, context=None):
+            self.calls += 1
+            if self.calls == 1:
+                first_evaluation.set()
+                release.wait(5)
+                return FlagEvaluationDetails(flag_key=key, value=VERBOSITY_IO, reason=Reason.STATIC)
+            return FlagEvaluationDetails(flag_key=key, value=VERBOSITY_FULL, reason=Reason.STATIC)
+
+        def get_boolean_details(self, key, default_value, context=None):
+            return FlagEvaluationDetails(flag_key=key, value=True, reason=Reason.STATIC)
+
+    source = _PolicySource()
+    with patch.object(feature_api, "get_client", return_value=_Client()):
+        older = threading.Thread(target=source.classify)
+        older.start()
+        assert first_evaluation.wait(5)
+        # Started second, so it saw the newer ruleset (FULL).
+        newer = threading.Thread(target=source.classify)
+        newer.start()
+        time.sleep(0.1)
+        release.set()
+        older.join(5)
+        newer.join(5)
+
+    assert source.cached == TelemetryPolicy(enabled=True, suppress_internal=False)
+
+
+def test_unknown_level_is_logged_once(caplog):
+    client = _FlagClient(telemetryLevel=("VERBOSE", Reason.TARGETING_MATCH))
+    source = _PolicySource()
+
+    with caplog.at_level("INFO", logger=flags.__name__), patch.object(
+        feature_api, "get_client", return_value=client
+    ):
+        for _ in range(5):
+            source.current()
+
+    assert len([r for r in caplog.records if "unknown variant" in r.getMessage()]) == 1
+
+
+def test_a_missing_flag_is_logged_once_even_when_classified(caplog):
+    with caplog.at_level("INFO", logger=flags.__name__), patch.object(
+        feature_api, "get_client", return_value=_FlagClient()
+    ):
+        _PolicySource().classify(EventDetails())
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2  # one "is not defined" per flag, nothing else
+    assert all("is not defined" in m for m in messages)
+
+
+def test_a_flag_that_appears_is_reported_as_defined(caplog):
+    client = _FlagClient()
+    resolver = _EnabledResolver()
+
+    with caplog.at_level("INFO", logger=flags.__name__), patch.object(
+        feature_api, "get_client", return_value=client
+    ):
+        resolver.current()
+        client.flags[OTEL_ENABLED_FLAG_KEY] = (False, Reason.STATIC)
+        resolver.current()
+
+    assert "otelEnabled is now defined" in caplog.text
+    assert "readable again" not in caplog.text

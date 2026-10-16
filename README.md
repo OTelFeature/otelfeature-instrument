@@ -200,7 +200,8 @@ classification is redone on every `PROVIDER_CONFIGURATION_CHANGED`, so
 attaching a `targeting` block to `telemetryLevel` (or `otelEnabled`) in flagd
 makes the next probe report `TARGETING_MATCH`, caching switches itself off
 for that flag, and spans start being evaluated individually. Remove the
-targeting and caching resumes by itself. No configuration, no restart, no code change here.
+targeting and caching resumes by itself. No configuration, no restart, no
+code change here.
 
 The event handler is what makes caching safe in the first place: flagd's
 in-process resolver pushes a changed ruleset over its gRPC sync stream, the
