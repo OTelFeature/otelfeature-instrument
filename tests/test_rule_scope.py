@@ -349,3 +349,38 @@ def test_a_record_span_scope_rule_is_decided_once_per_tracer(flagd, monkeypatch)
     assert len(spans) == 40
     # app: roots and children; jdbc: children - once each, not per span.
     assert len(evaluations) == 3
+
+
+def test_a_per_tracer_record_span_drop_treats_incoming_requests_as_roots(flagd):
+    """#18's rule on the per-tracer path: a SERVER span with a remote parent
+    dropped by a scope-only recordSpan rule stays in the caller's trace,
+    unsampled."""
+    flagd(
+        {
+            "flags": {
+                flags.RECORD_SPAN_FLAG_KEY: {
+                    "state": "ENABLED",
+                    "defaultVariant": "on",
+                    "variants": {"on": True, "off": False},
+                    "targeting": {"if": [_eq("otel.scope.name", "health"), "off", None]},
+                }
+            }
+        }
+    )
+    exporter = InMemorySpanExporter()
+    tracer = _provider(exporter).get_tracer("health")
+    remote = trace.set_span_in_context(
+        trace.NonRecordingSpan(
+            trace.SpanContext(
+                trace_id=0xABC, span_id=0xDEF, is_remote=True,
+                trace_flags=trace.TraceFlags(trace.TraceFlags.SAMPLED),
+            )
+        )
+    )
+
+    with tracer.start_as_current_span("GET /health", context=remote, kind=trace.SpanKind.SERVER) as span:
+        tracer.start_span("handler").end()
+
+    assert exporter.get_finished_spans() == ()
+    assert span.get_span_context().trace_id == 0xABC
+    assert not span.get_span_context().trace_flags.sampled
