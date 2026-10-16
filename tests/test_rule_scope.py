@@ -16,7 +16,11 @@ from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from otelfeature_instrument import flags, rule_scope
+from openfeature.evaluation_context import EvaluationContext
+from openfeature.hook import Hook
+from openfeature.transaction_context import ContextVarsTransactionContextPropagator
+
+from otelfeature_instrument import flags, rule_scope, tracing
 from otelfeature_instrument.flags import (
     _RECLASSIFY_ON,
     SAMPLE_RATIO_FLAG_KEY,
@@ -57,6 +61,12 @@ def _eq(key, value):
         (_if({"==": [{"var": "service"}, {}]}), False),  # a namespace span attrs can join
         (_if({"==": [{"var": {"cat": ["service", ".name"]}}, "weather"]}), False),
         (_if({"missing_some": [1, ["service.name", "url.path"]]}), False),
+        (_if({"missing_some": [{"var": "http.n"}, ["service.name"]]}), False),
+        (_if({"missing_some": [1, ["service.name", "service.namespace"]]}), True),
+        # fractional buckets on targetingKey unless its first argument is a
+        # string - a computed one may not be
+        ({"fractional": [{"merge": [["off", 50]]}, ["full", 50]]}, False),
+        ({"fractional": ["constant", ["off", 50], ["full", 50]]}, True),
     ],
 )
 def test_which_rules_are_decided_per_tracer(rule, tracer_level):
@@ -143,8 +153,9 @@ def test_a_muted_instrumentation_is_decided_once_per_tracer(flagd, level_evaluat
             noisy.start_span("chatter", kind=trace.SpanKind.CLIENT).end()
 
     assert {span.name for span in exporter.get_finished_spans()} == {"request"}
-    # Root + child policy per tracer, never per span.
-    assert len(level_evaluations) == 4
+    # Once per tracer and kind of span it starts (quiet: roots, noisy:
+    # children), never per span.
+    assert len(level_evaluations) == 2
     assert all(context.targeting_key is None for context in level_evaluations)
 
 
@@ -196,3 +207,105 @@ def test_a_ratio_by_service_is_decided_per_tracer_and_reaches_the_sampler(flagd)
 
     assert {span.name for span in exporter.get_finished_spans()} == {"g"}
     assert len(exporter.get_finished_spans()) == 20
+
+
+
+# --------------------------------------------------------------------------
+# Per tracer must never differ from per span
+# --------------------------------------------------------------------------
+
+SPANS = [
+    # (resource, scope, scope version, start attributes)
+    ({"service.name": "weather"}, "app", None, {}),
+    ({"service.name": "weather"}, "app", None, {"deployment.environment.name": "prod"}),
+    ({"service.name": "weather"}, "app", None, {"otel.scope.version": "2"}),
+    ({"service.name": "weather", "deployment.environment.name": "prod"}, "app", "1", {}),
+    ({"service.name": "gateway"}, "noisy", "1", {"service.namespace": "x"}),
+]
+
+RULES = [
+    _if(_eq("otel.scope.name", "noisy")),
+    _if(_eq("deployment.environment.name", "prod")),  # absent on most resources
+    _if(_eq("otel.scope.version", "2")),  # absent on version-less tracers
+    _if(_eq("service.namespace", "x")),
+    _if({"missing": ["deployment.environment.name"]}),
+    # (A fractional on targetingKey is per span by classification, and its
+    # outcome depends on random trace ids, so two runs can't be compared.)
+    {"fractional": [{"var": "service.name"}, ["off", 50], ["full", 50]]},
+]
+
+
+def _exported() -> list[tuple[int, int]]:
+    out = []
+    for i, (resource, scope, version, attributes) in enumerate(SPANS):
+        exporter = InMemorySpanExporter()
+        provider = SDKTracerProvider(resource=Resource.create(resource), sampler=flag_aware_sampler({}))
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        tracer = _VerbosityAwareTracerProvider(provider).get_tracer(scope, version)
+        for j in range(8):
+            tracer.start_span(f"{i}-{j}", attributes=attributes).end()
+        out.append((i, len(exporter.get_finished_spans())))
+    return out
+
+
+@pytest.mark.parametrize("rule", RULES, ids=[json.dumps(r)[:60] for r in RULES])
+def test_per_tracer_and_per_span_always_agree(flagd, rule):
+    flagd(_ruleset(rule))
+    per_tracer = _exported()
+    with pytest.MonkeyPatch.context() as forced:
+        forced.setattr(tracing._VerbosityAwareTracer, "_tracer_policy", lambda self, root: None)
+        per_span = _exported()
+
+    assert per_tracer == per_span
+
+
+def test_a_rule_on_a_key_the_resource_lacks_stays_per_span(flagd, level_evaluations):
+    flagd(_ruleset(_if(_eq("deployment.environment.name", "prod"))))
+    exporter = InMemorySpanExporter()
+    tracer = _provider(exporter).get_tracer("app")  # resource has no environment
+    level_evaluations.clear()
+
+    tracer.start_span("a", attributes={"deployment.environment.name": "prod"}).end()
+    tracer.start_span("b").end()
+
+    assert len(level_evaluations) == 2
+    assert [span.name for span in exporter.get_finished_spans()] == ["b"]
+
+
+def test_a_transaction_context_keeps_evaluation_per_span(flagd, level_evaluations):
+    """The SDK merges the transaction context in; it can differ per request."""
+    flagd(_ruleset(_if(_eq("otel.scope.name", "noisy.instrumentation"))))
+    feature_api.set_transaction_context_propagator(ContextVarsTransactionContextPropagator())
+    try:
+        exporter = InMemorySpanExporter()
+        tracer = _provider(exporter).get_tracer("app")
+        level_evaluations.clear()
+        for _ in range(5):
+            tracer.start_span("x").end()
+        assert len(level_evaluations) == 5
+    finally:
+        feature_api.clear_transaction_context_propagator()
+
+
+@pytest.mark.parametrize("ambient", ["global context", "api hook"])
+def test_ambient_context_sources_keep_evaluation_per_span(flagd, level_evaluations, ambient):
+    flagd(_ruleset(_if(_eq("otel.scope.name", "noisy.instrumentation"))))
+    if ambient == "global context":
+        feature_api.set_evaluation_context(EvaluationContext(attributes={"region": "eu"}))
+    else:
+        feature_api.add_hooks([Hook()])
+    try:
+        assert rule_scope.ambient_context_is_fixed() is False
+        tracer = _provider(InMemorySpanExporter()).get_tracer("app")
+        level_evaluations.clear()
+        for _ in range(3):
+            tracer.start_span("x").end()
+        assert len(level_evaluations) == 3
+    finally:
+        feature_api.clear_evaluation_context()
+        feature_api.clear_hooks()
+
+
+def test_flagds_own_sync_metadata_hook_is_not_ambient(flagd):
+    flagd(_ruleset())
+    assert rule_scope.ambient_context_is_fixed() is True

@@ -19,6 +19,7 @@ import logging
 from logging import getLogger
 from typing import Any, Iterator, Mapping
 
+from openfeature.evaluation_context import EvaluationContext
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.context import Context
@@ -40,6 +41,7 @@ from otelfeature_instrument.flags import (
     TelemetryPolicy,
     cached_policy,
     current_policy,
+    per_tracer_possible,
     policy_generation,
     tracer_policy,
 )
@@ -78,32 +80,39 @@ class _VerbosityAwareTracer(Tracer):
         self._scope_version = scope_version
         self._resource = resource or {}
         self._ids = ids
-        # (generation, policy for roots, policy for children); a policy of
-        # `None` means "this tracer has to evaluate per span".
-        self._per_tracer: tuple[int, TelemetryPolicy | None, TelemetryPolicy | None] = (
-            -1,
-            None,
-            None,
-        )
+        # generation -> {root: policy or None}; `None` means "this tracer has
+        # to evaluate per span". Filled lazily, root and child separately.
+        self._per_tracer: tuple[int, dict[bool, TelemetryPolicy | None]] = (-1, {})
+        self._tracer_ctx: tuple[EvaluationContext, frozenset[str]] | None = None
 
     def _tracer_policy(self, root: bool) -> TelemetryPolicy | None:
         """Decided once per tracer, for rules that read only resource and scope
-        keys; recomputed after every provider event."""
+        keys; recomputed after every provider event.
+
+        If the ruleset changes, spans in the few milliseconds before the
+        configuration-changed event is handled may still be decided with the
+        previous per-tracer answer, or with the new rule against the tracer
+        context; the event's new generation corrects both.
+        """
+        if not per_tracer_possible():
+            return None
+        # Read the generation before evaluating: an event landing in between
+        # leaves the result tagged stale, and the next span redoes it.
         generation = policy_generation()
-        per_tracer = self._per_tracer
-        if per_tracer[0] != generation:
-            context = tracer_context(
-                base=self._resource, scope_name=self._scope_name, scope_version=self._scope_version
-            )
-            # Read the generation before evaluating: an event landing in
-            # between leaves this tagged stale, and the next span redoes it.
-            per_tracer = (
-                generation,
-                tracer_policy(context, root=True),
-                tracer_policy(context, root=False),
-            )
-            self._per_tracer = per_tracer
-        return per_tracer[1] if root else per_tracer[2]
+        cached_generation, decided = self._per_tracer
+        if cached_generation != generation:
+            decided = {}
+            self._per_tracer = (generation, decided)
+        if root not in decided:
+            if self._tracer_ctx is None:
+                self._tracer_ctx = tracer_context(
+                    base=self._resource,
+                    scope_name=self._scope_name,
+                    scope_version=self._scope_version,
+                )
+            context, present = self._tracer_ctx
+            decided[root] = tracer_policy(context, present, root=root)
+        return decided[root]
 
     @staticmethod
     def _decide(policy: TelemetryPolicy, kind: SpanKind) -> int:

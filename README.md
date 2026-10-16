@@ -435,9 +435,10 @@ rule on the instrumentation scope:
 
 A rule that reads **only resource and scope keys** (`service.*`,
 `deployment.environment.name`, `telemetry.sdk.language`,
-`otel.scope.name`, `otel.scope.version`) has the same answer for every span
-of a tracer, so it is evaluated **once per tracer**, not per span, and kept
-until the next provider event (a ruleset change re-decides every tracer). A
+`otel.scope.name`, `otel.scope.version`) - and only ones the tracer actually
+has - has the same answer for every span of a tracer, so it is evaluated
+**once per tracer**, not per span, and kept until the next provider event (a
+ruleset change re-decides every tracer). A
 muted instrumentation then costs nothing per span: its spans are never
 created. The same holds for `traceSampleRatio` by `service.name`.
 
@@ -445,8 +446,12 @@ To tell, the extension reads the rule itself from flagd's in-process
 evaluator and lists the keys it can read. Anything else - a span-level key
 (`span.kind`, `url.path`, ...), `targetingKey` (including `fractional`
 without an explicit bucketing key), `otelfeature.*`, `$flagd.timestamp`, a
-computed `var` path, or a provider other than flagd in-process/file -
-keeps per-span evaluation, exactly as before.
+computed `var` path or `fractional` bucketing expression, a key the
+resource doesn't carry (a span attribute could supply it), or a provider
+other than flagd in-process/file - keeps per-span evaluation, exactly as
+before. So does anything outside the extension that adds to the evaluation
+context: a global evaluation context, a transaction context propagator, or
+API-level hooks.
 
 This is scope filtering, not `OTEL_INSTRUMENTATION_*_ENABLED`: the
 instrumentation is still installed and still runs its hooks; only its spans
@@ -459,6 +464,7 @@ exported span shows it as its instrumentation scope (`otel.scope.name` /
 `otelfeature_instrument`, which logs every scope a tracer is created for:
 
 ```python
+logging.basicConfig()
 logging.getLogger("otelfeature_instrument").setLevel(logging.DEBUG)
 # otelfeature-instrument: tracer for otel.scope.name='opentelemetry.instrumentation.fastapi' ...
 ```

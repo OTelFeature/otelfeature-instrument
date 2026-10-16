@@ -150,8 +150,9 @@ def span_context(
 
 def tracer_context(
     *, base: Mapping[str, Any], scope_name: str, scope_version: str | None
-) -> EvaluationContext:
-    """What every span of one tracer has in common: resource and scope keys.
+) -> tuple[EvaluationContext, frozenset[str]]:
+    """What every span of one tracer has in common - resource and scope keys -
+    and the set of those keys.
 
     No live keys - they change over time - and no `targetingKey`.
     """
@@ -159,7 +160,7 @@ def tracer_context(
     flat["otel.scope.name"] = scope_name
     if scope_version:
         flat["otel.scope.version"] = scope_version
-    return EvaluationContext(attributes=nest(flat))
+    return EvaluationContext(attributes=nest(flat)), frozenset(flat)
 
 
 def _overlaps(a: str, b: str) -> bool:

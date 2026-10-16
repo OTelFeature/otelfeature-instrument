@@ -41,7 +41,11 @@ from openfeature.event import EventDetails, ProviderEvent
 from openfeature.exception import ErrorCode
 from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOptions, Reason
 
-from otelfeature_instrument.rule_scope import is_tracer_scoped
+from otelfeature_instrument.rule_scope import (
+    ambient_context_is_fixed,
+    covered,
+    tracer_keys_of,
+)
 
 _logger = getLogger(__name__)
 
@@ -213,16 +217,16 @@ class _CachingResolver:
         # themselves, so a cached `False` is still a cached answer.
         self._cached: object | None = None
         # Not static, but its rule reads only keys that are fixed per tracer
-        # (see rule_scope.py): decided once per tracer instead of per span.
-        self._tracer_scoped = False
+        # (see rule_scope.py): the keys it reads, or `None`.
+        self._tracer_keys: frozenset[str] | None = None
 
     @property
     def cached(self):
         return self._cached
 
     @property
-    def tracer_scoped(self) -> bool:
-        return self._tracer_scoped
+    def tracer_keys(self) -> frozenset[str] | None:
+        return self._tracer_keys
 
     def classify(self, details: EventDetails | None = None) -> None:
         """Evaluate once, context-free, and decide whether to keep the answer.
@@ -251,11 +255,12 @@ class _CachingResolver:
         self._cached = value if cacheable else None
         # Only a rule that ran (TARGETING_MATCH/DEFAULT) is worth reading;
         # DISABLED and errors stay per span.
-        self._tracer_scoped = (
-            not cacheable
+        self._tracer_keys = (
+            tracer_keys_of(self.flag_key)
+            if not cacheable
             and details.error_code is None
             and reason in (Reason.TARGETING_MATCH, Reason.DEFAULT)
-            and is_tracer_scoped(self.flag_key)
+            else None
         )
 
         # A missing flag was already logged by `_report()`.
@@ -507,16 +512,21 @@ class _PolicySource:
         return self._evaluate(context, root)
 
     def tracer_policy(
-        self, context: EvaluationContext, *, root: bool = True
+        self, context: EvaluationContext, present: frozenset[str], *, root: bool = True
     ) -> TelemetryPolicy | None:
         """The policy for every span of one tracer, or `None` when some flag
         it needs depends on more than the tracer's resource and scope.
 
-        `context` describes the tracer only (resource + scope keys).
+        `context` describes the tracer only; `present` is the set of keys in
+        it. A rule reading a key the tracer doesn't have stays per span.
         """
         needed = (self.enabled, self.level, self.record) + ((self.ratio,) if root else ())
-        if any(r.cached is None and not r.tracer_scoped for r in needed):
-            return None
+        for resolver in needed:
+            if resolver.cached is not None:
+                continue
+            keys = resolver.tracer_keys
+            if keys is None or not covered(keys, present):
+                return None
         return self._evaluate(context, root)
 
     def _evaluate(self, context: EvaluationContext | None, root: bool) -> TelemetryPolicy:
@@ -605,13 +615,20 @@ def cached_policy(*, root: bool = True) -> TelemetryPolicy | None:
     return _policy_source.cached if root else _policy_source.cached_child
 
 
-def tracer_policy(context: EvaluationContext, *, root: bool = True) -> TelemetryPolicy | None:
+def tracer_policy(
+    context: EvaluationContext, present: frozenset[str], *, root: bool = True
+) -> TelemetryPolicy | None:
     """The policy for all spans of one tracer, if every flag allows that.
 
-    `context` describes the tracer (resource and scope keys only). Valid until
-    `policy_generation()` moves.
+    `context` describes the tracer (resource and scope keys only), `present`
+    lists its keys. Valid until `policy_generation()` moves, and only while
+    `ambient_context_is_fixed()`.
     """
-    return _policy_source.tracer_policy(context, root=root)
+    return _policy_source.tracer_policy(context, present, root=root)
+
+
+def per_tracer_possible() -> bool:
+    return ambient_context_is_fixed()
 
 
 def policy_generation() -> int:
