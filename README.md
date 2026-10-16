@@ -577,6 +577,31 @@ builds the same image with GitHub Actions layer caching and runs the same
   `src/`), so the `otelfeature-instrument` console script isn't available in
   `make shell`.
 
+## Releases
+
+Releases are [GitHub Releases](https://github.com/OTelFeature/otelfeature-instrument/releases)
+with the wheel and sdist attached; there is no PyPI package yet. A
+maintainer cuts one by pushing a tag after the version bump is merged:
+
+```sh
+git tag v0.3.0 && git push origin v0.3.0
+```
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) then, in
+the toolchain image: checks the tag against `version` in `pyproject.toml`
+(and fails if they differ), runs the tests, builds with `uv build`, and
+creates the release with generated notes. A tag like `v0.3.0-rc.1` (version
+`0.3.0rc1`) becomes a pre-release - the way to try unreleased code on the
+demo stage. Locally: `make dist` builds both artifacts into `dist/`,
+`make check-version TAG=v0.3.0` runs the tag check.
+
+To depend on a release, pin the git tag, e.g. with uv:
+
+```toml
+[tool.uv.sources]
+otelfeature-instrument = { git = "https://github.com/OTelFeature/otelfeature-instrument", tag = "v0.3.0" }
+```
+
 ## Known limitations
 
 ### `OFF` leaves gaps in traces

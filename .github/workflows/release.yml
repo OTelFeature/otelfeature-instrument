@@ -1,0 +1,57 @@
+# Release: pushing a `v*` tag builds the wheel and sdist in the toolchain image
+# (ci/Dockerfile) and publishes them as a GitHub Release (spec C-006).
+# `v*-rc.*` tags become pre-releases. PyPI publishing is out of scope for now.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload its assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the toolchain image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ci/Dockerfile
+          tags: otelfeature-instrument-ci
+          load: true
+          cache-from: type=gha,scope=ci-image
+          cache-to: type=gha,mode=max,scope=ci-image
+
+      - name: Check the tag matches pyproject.toml
+        run: make check-version TAG="$GITHUB_REF_NAME"
+
+      - name: Test
+        run: make test-only
+
+      - name: Build wheel and sdist
+        run: make dist
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${prerelease[@]}"
