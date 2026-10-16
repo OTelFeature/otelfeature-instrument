@@ -25,6 +25,7 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.trace import Link, Span, SpanKind, Tracer, TracerProvider
 from opentelemetry.util import types as otel_types
 
@@ -37,6 +38,12 @@ from otelfeature_instrument.flags import TelemetryPolicy, cached_policy, current
 
 
 _logger = getLogger(__name__)
+
+
+_random_ids = RandomIdGenerator()
+
+# What `_decide` can say about one span start.
+_KEEP, _STAND_IN, _DROP_TRACE = range(3)
 
 
 def _stand_in(span: Span) -> Span:
@@ -64,11 +71,33 @@ class _VerbosityAwareTracer(Tracer):
         self._ids = ids
 
     @staticmethod
-    def _suppress(policy: TelemetryPolicy, kind: SpanKind) -> bool:
+    def _decide(policy: TelemetryPolicy, kind: SpanKind) -> int:
         # Traces only: metrics are not routed through here and keep flowing.
         if not policy.enabled:
-            return True
-        return kind is SpanKind.INTERNAL and policy.suppress_internal
+            return _STAND_IN
+        if not policy.record_span:
+            return _DROP_TRACE
+        if kind is SpanKind.INTERNAL and policy.suppress_internal:
+            return _STAND_IN
+        return _KEEP
+
+    def _drop(self, context: Context | None, trace_id: int | None) -> Span | None:
+        """`recordSpan=false`. A child is suppressed like an `IO` span (`None`:
+        its children attach to the real parent). A root drops its whole trace:
+        it gets a valid but *non-sampled* context, so its children are not
+        sampled either - instead of each starting a trace of its own - and
+        outgoing calls propagate `sampled=0`."""
+        if trace.get_current_span(context).get_span_context().is_valid:
+            return None
+        ids = self._ids or _random_ids
+        return trace.NonRecordingSpan(
+            trace.SpanContext(
+                trace_id=trace_id if trace_id is not None else ids.generate_trace_id(),
+                span_id=ids.generate_span_id(),
+                is_remote=False,
+                trace_flags=trace.TraceFlags(trace.TraceFlags.DEFAULT),
+            )
+        )
 
     def _evaluate(
         self,
@@ -114,19 +143,30 @@ class _VerbosityAwareTracer(Tracer):
         record_exception: bool,
         set_status_on_exception: bool,
     ) -> Span | None:
-        """The real span, or `None` when it is suppressed."""
+        """The span to hand out, or `None` to stand in for the current one.
+
+        Either the real span, or - for a root dropped by `recordSpan` - a
+        non-recording, non-sampled one that carries the dropped trace.
+        """
         args = (name, context, kind, attributes, links, start_time, record_exception,
                 set_status_on_exception)
         policy = cached_policy()
         if policy is not None:
             # The static path: no context, no trace-id handover.
-            if self._suppress(policy, kind):
+            decision = self._decide(policy, kind)
+            if decision == _STAND_IN:
                 return None
+            if decision == _DROP_TRACE:
+                return self._drop(context, None)
             return self._wrapped.start_span(*args)
 
         policy, root_id = self._evaluate(name, context, kind, attributes)
-        if self._suppress(policy, kind):
+        decision = self._decide(policy, kind)
+        if decision == _STAND_IN:
             return None
+        if decision == _DROP_TRACE:
+            # A dropped root keeps the trace id it was evaluated on.
+            return self._drop(context, root_id)
         if root_id is None:
             return self._wrapped.start_span(*args)
         # Set only around the one call that consumes it: anything that started
