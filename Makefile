@@ -12,7 +12,8 @@ TEST_CMD = uv run --frozen --no-sync pytest -q -p no:cacheprovider
 image:
 	docker build -f ci/Dockerfile -t $(IMAGE) .
 
-test: image test-only
+test: image
+	$(MAKE) test-only
 
 # Run the tests in an already built image (CI builds it with layer caching).
 test-only:

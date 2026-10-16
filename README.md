@@ -567,6 +567,14 @@ dependency layer. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 builds the same image with GitHub Actions layer caching and runs the same
 `make test-only`, on every pull request and on `main`.
 
+- The container runs as root. `make test` writes nothing into the checkout,
+  but commands you run in `make shell` (e.g. a bare `pytest`, which leaves a
+  `.pytest_cache`) can leave root-owned files on a Linux filesystem.
+- Only Python 3.12 is tested, although `requires-python` is `>=3.10`.
+- The image doesn't install the project itself (tests import it from
+  `src/`), so the `otelfeature-instrument` console script isn't available in
+  `make shell`.
+
 ## Known limitations
 
 ### `OFF` leaves gaps in traces
