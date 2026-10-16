@@ -212,6 +212,62 @@ SDK emits the event, and the kept answer is replaced - which is why the
 so for a brief moment after startup spans fall through to a direct
 evaluation: the right answer, just not yet the cheap one.
 
+### The evaluation context
+
+When a flag carries `targeting`, each span start is described to it in
+OpenTelemetry semantic-convention terms - so a targeting rule is written
+against the same names as the telemetry itself:
+
+| Source                         | Keys |
+|--------------------------------|------|
+| Resource (once per process)    | `service.name`, `service.namespace`, `service.version`, `deployment.environment.name`, `telemetry.sdk.language` |
+| Instrumentation scope          | `otel.scope.name`, `otel.scope.version` |
+| Span at start                  | `span.kind` (lower-case: `server`, `client`, `internal`, `producer`, `consumer`), `span.name`, plus every attribute the span is started with - typically `url.path`, `http.request.method`, `server.address`, `db.system.name`, `db.operation.name`, `rpc.service` |
+| `targetingKey`                 | the **trace id** (32 hex digits), so `fractional` buckets a whole trace the same way in every service |
+
+```json
+"targeting": {
+  "if": [
+    { "and": [
+      { "==": [ { "var": "service.name" }, "weather" ] },
+      { "==": [ { "var": "span.kind" }, "server" ] },
+      { "==": [ { "var": "url.path" }, "/health" ] }
+    ] },
+    "off", "full"
+  ]
+}
+```
+
+- **Keys are nested by dot segment.** `service.name` is sent as
+  `{"service": {"name": ...}}`, because JsonLogic's `var` splits on `.` and a
+  flat dotted key never matches in any flagd evaluator
+  ([OTelFeature/poc#22](https://github.com/OTelFeature/poc/issues/22)). Rules
+  keep using the semconv name verbatim.
+- **A name that is both a leaf and a namespace** (a deprecated/replacement
+  pair such as `db.system` and `db.system.name`): the namespace wins and the
+  leaf is dropped, logged at `DEBUG`. Target the current name.
+- **Only what exists when the span starts.** `http.route` and
+  `http.response.status_code` are *not* available: the instrumentation sets
+  them later. Target `url.path` instead of the route.
+- **Root spans keep the trace id they were evaluated on.** For a span with no
+  parent, the trace id is generated before the flags are asked and handed to
+  the SDK, so `targetingKey` and the exported trace id are the same.
+- **Built only off the static path.** While every flag is static, no context
+  is built at all.
+
+Rough per-span cost (one `SERVER` span with two attributes and one `INTERNAL`
+child, no export; Python 3.12, a laptop Intel CPU - orders of magnitude, not
+a benchmark):
+
+| Setup                                         | per span |
+|-----------------------------------------------|----------|
+| plain SDK tracer                              | ~21 µs   |
+| OTelFeature, flags static (cached policy)     | ~26 µs   |
+| OTelFeature, `telemetryLevel` targeted (FILE/in-process flagd) | ~73 µs |
+
+Targeting costs one in-process flag evaluation per span, so it belongs on a
+flag while it is being used, not left on permanently.
+
 ## Configuration
 
 | Environment variable         | Default    | Description                                                    |
