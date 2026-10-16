@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import threading
 from logging import getLogger
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from openfeature.evaluation_context import EvaluationContext
 from opentelemetry.sdk.resources import Resource
@@ -67,11 +67,15 @@ def nest(flat: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _plain(value: Any) -> Any:
-    # OTel array attributes are tuples/sequences; JSON-ish lists are what the
-    # evaluators expect.
     if isinstance(value, (str, bool, int, float)) or value is None:
         return value
-    return list(value)
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, Sequence):
+        # OTel array attributes are tuples/sequences; JSON-ish lists are what
+        # the evaluators expect.
+        return [_plain(item) for item in value]
+    return str(value)
 
 
 def resource_attributes(resource: Resource | None) -> dict[str, Any]:
@@ -90,19 +94,39 @@ def span_context(
     attributes: otel_types.Attributes,
     trace_id: int | None,
 ) -> EvaluationContext:
-    """The context for one span-start decision. Only built off the static path."""
-    flat: dict[str, Any] = dict(base)
-    if attributes:
-        flat.update(attributes)
-    flat["otel.scope.name"] = scope_name
+    """The context for one span-start decision. Only built off the static path.
+
+    Resource keys and the keys set here win over the span's own start
+    attributes: an attribute named like one of them - or one that would turn
+    one of them into a namespace, such as `span.kind.detail` - is dropped
+    rather than allowed to replace or hide it.
+    """
+    owned: dict[str, Any] = dict(base)
+    owned["otel.scope.name"] = scope_name
     if scope_version:
-        flat["otel.scope.version"] = scope_version
-    flat["span.kind"] = kind.name.lower()
-    flat["span.name"] = name
+        owned["otel.scope.version"] = scope_version
+    owned["span.kind"] = kind.name.lower()
+    owned["span.name"] = name
+
+    flat: dict[str, Any] = {}
+    for key, value in (attributes or {}).items():
+        if any(_overlaps(key, own) for own in owned):
+            _logger.debug(
+                "otelfeature-instrument: dropping start attribute %r from the "
+                "evaluation context - it clashes with a key set by the extension",
+                key,
+            )
+            continue
+        flat[key] = value
+    flat.update(owned)
     return EvaluationContext(
         targeting_key=None if trace_id is None else format(trace_id, "032x"),
         attributes=nest(flat),
     )
+
+
+def _overlaps(a: str, b: str) -> bool:
+    return a == b or a.startswith(b + ".") or b.startswith(a + ".")
 
 
 class PresetTraceIdGenerator(IdGenerator):

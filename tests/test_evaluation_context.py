@@ -282,3 +282,71 @@ def test_real_flagd_fractional_buckets_a_whole_trace_alike(flagd):
             EvaluationContext(targeting_key=format(trace_id, "032x")),
         )
         assert (len(names) == 1) == (level == "IO")
+
+
+
+def test_a_span_started_during_evaluation_does_not_take_the_roots_trace_id(monkeypatch):
+    """E.g. a hook or an instrumented provider starting a span of its own."""
+    provider = SDKTracerProvider(resource=RESOURCE)
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    wrapper = _VerbosityAwareTracerProvider(provider)
+    tracer = wrapper.get_tracer("my.scope")
+    sneaky = provider.get_tracer("hook")  # straight on the SDK, during evaluation
+    keys: list[str] = []
+
+    def policy(context=None):
+        keys.append(context.targeting_key)
+        sneaky.start_span("during-evaluation").end()
+        return TelemetryPolicy()
+
+    monkeypatch.setattr(tracing, "cached_policy", lambda: None)
+    monkeypatch.setattr(tracing, "current_policy", policy)
+
+    tracer.start_span("root", kind=trace.SpanKind.SERVER).end()
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert format(spans["root"].context.trace_id, "032x") == keys[0]
+    assert spans["during-evaluation"].context.trace_id != spans["root"].context.trace_id
+
+
+def test_a_tracer_obtained_before_wrapping_still_keeps_the_evaluated_trace_id(seen_contexts):
+    provider = SDKTracerProvider(resource=RESOURCE)
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    provider.get_tracer("lib", "1")  # cached by the SDK with the old generator
+
+    _VerbosityAwareTracerProvider(provider).get_tracer("lib", "1").start_span("root").end()
+
+    (root,) = exporter.get_finished_spans()
+    assert format(root.context.trace_id, "032x") == seen_contexts[0].targeting_key
+
+
+def test_start_attributes_cannot_replace_or_hide_extension_keys():
+    context = span_context(
+        base={"service.name": "weather"},
+        scope_name="my.scope",
+        scope_version=None,
+        name="GET /",
+        kind=trace.SpanKind.SERVER,
+        attributes={
+            "service.name": "spoofed",
+            "span.kind.detail": "x",
+            "otel": "leaf",
+            "url.path": "/",
+        },
+        trace_id=None,
+    )
+
+    assert context.attributes == {
+        "service": {"name": "weather"},
+        "otel": {"scope": {"name": "my.scope"}},
+        "span": {"kind": "server", "name": "GET /"},
+        "url": {"path": "/"},
+    }
+
+
+def test_attribute_values_of_every_otel_type_stay_json_shaped():
+    assert nest(
+        {"a": b"ab", "b": (1, 2), "c": [True, False], "d": 1.5, "e": ("x", b"y")}
+    ) == {"a": "ab", "b": [1, 2], "c": [True, False], "d": 1.5, "e": ["x", "y"]}

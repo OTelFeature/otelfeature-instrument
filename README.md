@@ -249,21 +249,29 @@ against the same names as the telemetry itself:
 - **Only what exists when the span starts.** `http.route` and
   `http.response.status_code` are *not* available: the instrumentation sets
   them later. Target `url.path` instead of the route.
+- **Extension keys win over start attributes.** A start attribute named
+  like a resource key or one of the keys above (`span.kind`,
+  `otel.scope.name`, ...) - or one that would turn such a key into a
+  namespace, like `span.kind.detail` - is dropped, logged at `DEBUG`.
 - **Root spans keep the trace id they were evaluated on.** For a span with no
   parent, the trace id is generated before the flags are asked and handed to
-  the SDK, so `targetingKey` and the exported trace id are the same.
+  the SDK, so `targetingKey` and the exported trace id are the same. This
+  needs the OpenTelemetry SDK's `TracerProvider` (which
+  `otelfeature-instrument` always installs); wrapped around any other
+  provider, roots are evaluated without a `targetingKey`, and `fractional`
+  then puts every root in the same bucket.
 - **Built only off the static path.** While every flag is static, no context
   is built at all.
 
 Rough per-span cost (one `SERVER` span with two attributes and one `INTERNAL`
 child, no export; Python 3.12, a laptop Intel CPU - orders of magnitude, not
-a benchmark):
+a benchmark; reproduce with `uv run python benchmarks/span_cost.py`):
 
 | Setup                                         | per span |
 |-----------------------------------------------|----------|
 | plain SDK tracer                              | ~21 µs   |
 | OTelFeature, flags static (cached policy)     | ~26 µs   |
-| OTelFeature, `telemetryLevel` targeted (FILE/in-process flagd) | ~73 µs |
+| OTelFeature, `telemetryLevel` targeted (FILE/in-process flagd) | ~75-105 µs |
 
 Targeting costs one in-process flag evaluation per span, so it belongs on a
 flag while it is being used, not left on permanently.
