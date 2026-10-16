@@ -115,9 +115,78 @@ def test_a_targeted_ratio_records_the_variant_that_decided(flagd):
     assert ratios == {"low": 0.2, "high": 0.9}
 
 
-def test_the_static_path_builds_the_attributes_once():
-    source = _PolicySource()
-    policy = source._combine(True, "FULL", (0.25, "quarter"))
+def test_the_static_path_builds_the_attributes_once(flagd):
+    flagd({"defaultVariant": "quarter", "variants": {"quarter": 0.25}})
+    first = flags._policy_source.cached.decision_attributes
 
-    assert policy.decision_attributes is policy.decision_attributes
+    _traced(50)
+
+    assert flags._policy_source.cached.decision_attributes is first
     assert TelemetryPolicy().decision_attributes is None
+
+
+def test_the_shared_attributes_are_read_only():
+    policy = _PolicySource()._combine(True, "FULL", (0.25, True, "quarter"))
+
+    with pytest.raises(TypeError):
+        policy.decision_attributes["feature_flag.key"] = "tampered"
+
+
+class _NoVariantClient:
+    """A provider that reports values but no variants (they're optional)."""
+
+    def __init__(self, ratio):
+        self.ratio = ratio
+
+    def _get(self, key, default_value, context=None):
+        from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
+
+        value = self.ratio if key == SAMPLE_RATIO_FLAG_KEY else default_value
+        return FlagEvaluationDetails(flag_key=key, value=value, reason=Reason.STATIC)
+
+    get_string_details = get_boolean_details = get_float_details = _get
+
+
+def test_a_provider_without_variants_still_records_the_decision(monkeypatch):
+    monkeypatch.setattr(flags, "_policy_source", _PolicySource())
+    monkeypatch.setattr(feature_api, "get_client", lambda: _NoVariantClient(0.5))
+    flags._policy_source.classify()
+
+    roots = [s for s in _traced(100) if s.parent is None]
+
+    assert roots
+    for root in roots:
+        assert root.attributes["feature_flag.key"] == SAMPLE_RATIO_FLAG_KEY
+        assert root.attributes["otelfeature.sample_ratio"] == 0.5
+        assert "feature_flag.result.variant" not in root.attributes
+
+
+@pytest.mark.parametrize(
+    "variant_value, startup_ratio, recorded",
+    [
+        (5, 0.5, 1.0),  # clamped to 1.0, which differs from the startup 0.5
+        (5, 1.0, None),  # clamped to exactly the startup value: no decision
+        (1, 1.0, None),  # an int equal to the startup float
+    ],
+)
+def test_clamped_and_int_values(flagd, variant_value, startup_ratio, recorded):
+    flagd({"defaultVariant": "v", "variants": {"v": variant_value}}, startup_ratio=startup_ratio)
+
+    roots = [s for s in _traced(50) if s.parent is None]
+
+    assert roots
+    assert {root.attributes.get("otelfeature.sample_ratio") for root in roots} == {recorded}
+
+
+def test_the_applications_own_attributes_win(flagd):
+    flagd({"defaultVariant": "all", "variants": {"all": 1.0}}, startup_ratio=0.5)
+    exporter = InMemorySpanExporter()
+    provider = SDKTracerProvider(resource=Resource.create(), sampler=flag_aware_sampler({}))
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = _VerbosityAwareTracerProvider(provider).get_tracer("t")
+
+    tracer.start_span("root", attributes={"feature_flag.key": "appFlag"}).end()
+
+    (root,) = exporter.get_finished_spans()
+    assert root.attributes["feature_flag.key"] == "appFlag"
+    assert root.attributes["otelfeature.sample_ratio"] == 1.0

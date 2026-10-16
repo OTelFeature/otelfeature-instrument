@@ -29,9 +29,10 @@ from __future__ import annotations
 import math
 import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import cached_property
 from logging import getLogger
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from openfeature import api as feature_api
@@ -104,23 +105,29 @@ class TelemetryPolicy:
     record_span: bool = True
     # Probability that a new trace is sampled. From `traceSampleRatio`.
     sample_ratio: float = 1.0
-    # The `traceSampleRatio` variant behind `sample_ratio` when that is a
-    # non-default decision - the flag set it, to something other than the
-    # startup value. `None` otherwise, and then nothing is recorded on spans.
-    sample_ratio_variant: str | None = field(default=None)
+    # Whether `sample_ratio` is a non-default decision: the flag was read and
+    # set a ratio other than the startup value. Only then is anything
+    # recorded on spans.
+    sample_ratio_decided: bool = False
+    # The variant behind that decision, when the provider reports one
+    # (variants are optional in OpenFeature).
+    sample_ratio_variant: str | None = None
 
     @cached_property
     def decision_attributes(self) -> Mapping[str, Any] | None:
         """Attributes recorded on a kept root span, so a backend can tell which
         flag decided and re-weight counts by the ratio. Built once per policy
-        object, so a cached policy never allocates them again."""
-        if self.sample_ratio_variant is None:
+        object, so a cached policy never builds them again; read-only, since
+        every root on the static path shares them."""
+        if not self.sample_ratio_decided:
             return None
-        return {
+        attributes: dict[str, Any] = {
             "feature_flag.key": SAMPLE_RATIO_FLAG_KEY,
-            "feature_flag.result.variant": self.sample_ratio_variant,
             "otelfeature.sample_ratio": self.sample_ratio,
         }
+        if self.sample_ratio_variant is not None:
+            attributes["feature_flag.result.variant"] = self.sample_ratio_variant
+        return MappingProxyType(attributes)
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] = os.environ) -> TelemetryPolicy:
@@ -340,12 +347,12 @@ class _SampleRatioResolver(_CachingResolver):
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
         return client.get_float_details(self.flag_key, self.default, context)
 
-    def _answer(self, details: FlagEvaluationDetails) -> tuple[float, str | None]:
-        # The variant travels with the ratio so a kept root can record which
-        # one decided; `None` when the flag couldn't be read and the startup
-        # value is served instead.
-        variant = details.variant if details.error_code is None else None
-        return self._normalise(details.value), variant
+    def _answer(self, details: FlagEvaluationDetails) -> tuple[float, bool, str | None]:
+        # `(ratio, read, variant)`: whether the flag was actually read travels
+        # with the ratio, so a kept root can record a decision the flag made -
+        # and never one the startup fallback made.
+        read = details.error_code is None
+        return self._normalise(details.value), read, details.variant if read else None
 
     def _normalise(self, value) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
@@ -399,7 +406,7 @@ class _PolicySource:
         )
         self.record = _RecordSpanResolver(self.defaults.record_span)
         self.ratio = _SampleRatioResolver(self.defaults.sample_ratio)
-        self._default_ratio = (self.defaults.sample_ratio, None)
+        self._default_ratio = (self.defaults.sample_ratio, False, None)
         # Same contract as `_CachingResolver._cached`: set only while every
         # input flag is cached, so the static path stays one attribute read
         # and allocates nothing.
@@ -474,7 +481,11 @@ class _PolicySource:
         return self._combine(enabled, level, ratio, self.record.current(context))
 
     def _combine(
-        self, enabled: bool, level: str, ratio: tuple[float, str | None], record: bool = True
+        self,
+        enabled: bool,
+        level: str,
+        ratio: tuple[float, bool, str | None],
+        record: bool = True,
     ) -> TelemetryPolicy:
         # Precedence: OTEL_SDK_DISABLED (the floor, see __init__) >
         # otelEnabled / telemetryLevel=OFF > recordSpan.
@@ -487,15 +498,17 @@ class _PolicySource:
         suppress_internal = {VERBOSITY_FULL: False, VERBOSITY_IO: True}.get(
             level, self.defaults.suppress_internal
         )
-        value, variant = ratio
+        value, read, variant = ratio
+        # A decision is only worth recording when the flag moved the ratio
+        # away from what the process would do anyway.
+        decided = read and value != self.defaults.sample_ratio
         return TelemetryPolicy(
             enabled=True,
             suppress_internal=suppress_internal,
             record_span=record,
             sample_ratio=value,
-            # A decision is only worth recording when the flag moved the
-            # ratio away from what the process would do anyway.
-            sample_ratio_variant=variant if value != self.defaults.sample_ratio else None,
+            sample_ratio_decided=decided,
+            sample_ratio_variant=variant if decided else None,
         )
 
 

@@ -78,8 +78,10 @@ class _FlagRatioSampler(Sampler):
             decision = policy.decision_attributes
             if decision is not None:
                 # The SDK takes the span's attributes from the sampling
-                # result, so the start attributes are carried over.
-                attributes = {**attributes, **decision} if attributes else decision
+                # result, so the start attributes are carried over - and win:
+                # an application's own `feature_flag.*` attributes on its root
+                # span are not overwritten.
+                attributes = {**decision, **attributes} if attributes else decision
             return SamplingResult(
                 Decision.RECORD_AND_SAMPLE, attributes, _get_parent_trace_state(parent_context)
             )

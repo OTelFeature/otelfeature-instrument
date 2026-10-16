@@ -337,14 +337,15 @@ stands for ten):
 | Attribute                     | Value                                   |
 |-------------------------------|-----------------------------------------|
 | `feature_flag.key`            | `traceSampleRatio`                      |
-| `feature_flag.result.variant` | the variant that decided, e.g. `tenth`  |
+| `feature_flag.result.variant` | the variant that decided, e.g. `tenth` (only when the provider reports variants) |
 | `otelfeature.sample_ratio`    | the applied ratio, e.g. `0.1`           |
 
 Root spans only (children inherit their root's decision), and nothing is
 added when everything is at defaults: no flag, the flag at the startup
 value, or a flag that couldn't be read. On the static path the attributes
 are built once per cached policy, not per span. The span's own start
-attributes are kept alongside.
+attributes are kept alongside, and win on a clash: an application's own
+`feature_flag.key` on its root span is not overwritten.
 
 ### The evaluation context
 
