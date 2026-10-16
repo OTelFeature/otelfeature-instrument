@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from openfeature.contrib.provider.flagd import FlagdProvider
 from openfeature.contrib.provider.flagd.config import ResolverType
 from opentelemetry import trace
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import AggregationTemporality, InMemoryMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -145,27 +146,41 @@ def test_is_error(attributes, expected):
 
 
 def test_the_otlp_view_is_unchanged_by_the_extra_reader():
-    """A cumulative reader standing in for the OTLP one sees exactly what it
-    would without the error-rate reader, however often that one collects."""
-    alone = InMemoryMetricReader()
-    together, ours = InMemoryMetricReader(), error_rate_reader()
-    services = (_Service(alone), _Service(together, ours))
+    """On the same provider, a cumulative reader standing in for the OTLP one
+    keeps cumulative totals, however often the delta reader collects."""
+    otlp, ours = InMemoryMetricReader(), error_rate_reader()
+    service = _Service(otlp, ours)
     publisher = ErrorRatePublisher(ours, interval=10)
 
-    for round_ in range(3):
-        for service in services:
-            for i in range(5):
-                service.request(500 if i == 0 else 200)
+    for _ in range(3):
+        for i in range(5):
+            service.request(500 if i == 0 else 200)
         publisher.collect_once()
 
-    def counts(reader):
-        (resource_metrics,) = reader.get_metrics_data().resource_metrics
-        (metric,) = resource_metrics.scope_metrics[0].metrics
-        return metric.data.aggregation_temporality, sorted(
-            (tuple(sorted(p.attributes.items())), p.count) for p in metric.data.data_points
-        )
+    (resource_metrics,) = otlp.get_metrics_data().resource_metrics
+    (metric,) = resource_metrics.scope_metrics[0].metrics
+    assert metric.data.aggregation_temporality is AggregationTemporality.CUMULATIVE
+    counts = {p.attributes["http.response.status_code"]: p.count for p in metric.data.data_points}
+    assert counts == {500: 3, 200: 12}
 
-    assert counts(together) == counts(alone)
+
+def test_the_timer_publishes_without_anyone_calling_it():
+    reader = error_rate_reader()
+    service = _Service(reader)
+    service.request(500)
+    service.request(200)
+
+    publisher = ErrorRatePublisher(reader, interval=0.02)
+    thread = publisher.start()
+    try:
+        deadline = time.monotonic() + 5
+        while _live_rate() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert _live_rate() == 0.5
+    finally:
+        publisher.stop()
+        thread.join(5)
+    assert not thread.is_alive()
 
 
 def test_span_sampling_does_not_change_the_measured_rate(monkeypatch):
@@ -206,6 +221,28 @@ def test_the_rate_is_in_every_evaluation_context_nested():
     )
 
     assert context.attributes["otelfeature"] == {"http": {"server": {"error_rate": 0.25}}}
+
+
+@pytest.mark.parametrize(
+    "attribute", [ERROR_RATE_KEY, "otelfeature.anything", "otelfeature"]
+)
+def test_the_otelfeature_namespace_cannot_be_faked_while_the_rate_is_absent(attribute):
+    """No requests yet (or a failed collection): the key is absent, and a
+    start attribute must still not be able to supply it."""
+    assert ERROR_RATE_KEY not in evaluation_context._live
+
+    context = span_context(
+        base={},
+        scope_name="s",
+        scope_version=None,
+        name="GET /",
+        kind=trace.SpanKind.SERVER,
+        attributes={attribute: 0.99, "url.path": "/"},
+        trace_id=None,
+    )
+
+    assert "otelfeature" not in context.attributes
+    assert context.attributes["url"] == {"path": "/"}
 
 
 def test_a_failing_collection_keeps_the_loop_alive(monkeypatch, caplog):

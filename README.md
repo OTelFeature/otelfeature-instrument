@@ -339,7 +339,7 @@ against the same names as the telemetry itself:
 | Instrumentation scope          | `otel.scope.name`, `otel.scope.version` |
 | Span at start                  | `span.kind` (lower-case: `server`, `client`, `internal`, `producer`, `consumer`), `span.name`, plus every attribute the span is started with - typically `url.path`, `http.request.method`, `server.address`, `db.system.name`, `db.operation.name`, `rpc.service` |
 | `targetingKey`                 | the **trace id** (32 hex digits), so `fractional` buckets a whole trace the same way in every service |
-| Live, per process              | `otelfeature.http.server.error_rate` - see [Error rate](#error-rate-in-the-context) |
+| Live, per process              | `otelfeature.http.server.error_rate` - see [Error rate](#error-rate-in-the-context). The whole `otelfeature.*` namespace is reserved: start attributes in it are dropped |
 
 ```json
 "targeting": {
@@ -421,17 +421,25 @@ can close the loop on its own - no outside script, no new metric:
   rule comparing it then sees `null`, which is not `> 0.05`).
 - **Per service:** each process measures and publishes its own rate, so a
   rule raises sampling for the service whose errors went up.
-- **Lags by one interval:** the rate a rule sees describes the *previous*
-  interval.
+- **Lags:** the rate a rule sees describes the *previous* interval, so it
+  reacts one to two intervals after errors start.
+- **No minimum sample:** one failure in one request is a rate of `1.0`. On a
+  quiet service, guard the rule (or keep the interval long enough to
+  collect a meaningful number of requests).
+- **Span-start contexts only:** the key is merged into the contexts the
+  extension builds for span decisions, not into OpenFeature evaluations the
+  application makes itself.
 
 > **Set `OTEL_SEMCONV_STABILITY_OPT_IN=http`.** The Python HTTP
 > instrumentations only emit `http.server.request.duration` (with
 > `error.type`) with the stable HTTP semantic conventions opted in.
 > Without it they emit the older `http.server.duration`, which has no
 > `error.type`; the rate then falls back to counting
-> `http.status_code >= 500`, which misses errors that never produced a
-> response. With `http/dup` both metrics are emitted; only the stable one
-> is counted. `otelfeature-instrument` does not set the opt-in itself,
+> `http.status_code >= 500`. With `http/dup` both metrics are emitted; only
+> the stable one is counted. Either way an unhandled exception in a bare
+> ASGI app is recorded with neither `error.type` nor a status code and is not
+> counted - frameworks such as FastAPI/Starlette turn it into a `500` first,
+> so it is. `otelfeature-instrument` does not set the opt-in itself,
 > because it also renames the metrics and attributes your dashboards see.
 
 ## Configuration

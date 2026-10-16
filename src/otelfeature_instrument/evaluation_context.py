@@ -36,13 +36,18 @@ RESOURCE_KEYS = (
 
 
 # Process-wide values that change over time (e.g. the error rate), merged
-# into every context. Replaced wholesale rather than mutated, so a reader
-# always sees one consistent snapshot without a lock.
+# into every span-start context. Replaced wholesale rather than mutated, so a
+# reader always sees one consistent snapshot without a lock.
 _live: Mapping[str, Any] = {}
+
+# Keys under this namespace belong to the extension, present or not: a span
+# start attribute in it is always dropped, so it can't stand in for a live
+# value that is momentarily absent (no requests, a failed collection).
+RESERVED_NAMESPACE = "otelfeature"
 
 
 def set_live_attribute(key: str, value: Any | None) -> None:
-    """Publish `value` under `key` in every evaluation context; `None` removes it."""
+    """Publish `value` under `key` in every span-start context; `None` removes it."""
     global _live
     live = dict(_live)
     if value is None:
@@ -128,7 +133,7 @@ def span_context(
 
     flat: dict[str, Any] = {}
     for key, value in (attributes or {}).items():
-        if any(_overlaps(key, own) for own in owned):
+        if _overlaps(key, RESERVED_NAMESPACE) or any(_overlaps(key, own) for own in owned):
             _logger.debug(
                 "otelfeature-instrument: dropping start attribute %r from the "
                 "evaluation context - it clashes with a key set by the extension",

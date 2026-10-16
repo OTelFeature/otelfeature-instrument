@@ -96,8 +96,7 @@ class ErrorRatePublisher:
     def __init__(self, reader: InMemoryMetricReader, interval: float) -> None:
         self._reader = reader
         self._interval = interval
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._stopped = threading.Event()
 
     def collect_once(self) -> float | None:
         try:
@@ -108,17 +107,19 @@ class ErrorRatePublisher:
         set_live_attribute(ERROR_RATE_KEY, rate)
         return rate
 
-    def start(self) -> None:
-        self._thread = threading.Thread(
-            target=self._run, name="otelfeature-error-rate", daemon=True
-        )
-        self._thread.start()
+    def start(self) -> threading.Thread:
+        # A daemon for the life of the process. After MeterProvider.shutdown()
+        # a collection quietly yields nothing, so the key simply drops out.
+        thread = threading.Thread(target=self._run, name="otelfeature-error-rate", daemon=True)
+        thread.start()
+        return thread
 
     def stop(self) -> None:
-        self._stop.set()
+        """Ends the loop after the current wait (used by tests)."""
+        self._stopped.set()
 
     def _run(self) -> None:
-        while not self._stop.wait(self._interval):
+        while not self._stopped.wait(self._interval):
             self.collect_once()
 
 
