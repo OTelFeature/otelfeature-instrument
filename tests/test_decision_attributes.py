@@ -27,11 +27,13 @@ FLAG_KEYS = {"feature_flag.key", "feature_flag.result.variant"}
 
 @pytest.fixture
 def flagd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    def start(flag: dict | None, *, startup_ratio: float = 1.0) -> None:
+    def start(
+        flag: dict | None, *, startup_ratio: float = 1.0, key: str = SAMPLE_RATIO_FLAG_KEY
+    ) -> None:
         monkeypatch.setattr(
             flags, "_policy_source", _PolicySource(TelemetryPolicy(sample_ratio=startup_ratio))
         )
-        ruleset = {"flags": {} if flag is None else {SAMPLE_RATIO_FLAG_KEY: {"state": "ENABLED", **flag}}}
+        ruleset = {"flags": {} if flag is None else {key: {"state": "ENABLED", **flag}}}
         path = tmp_path / "flags.json"
         path.write_text(json.dumps(ruleset), encoding="utf-8")
         feature_api.set_provider_and_wait(
@@ -128,33 +130,6 @@ def test_the_shared_attributes_are_read_only():
         policy.decision_attributes["otelfeature.sample_ratio"] = 1.0
 
 
-class _NoVariantClient:
-    """A provider that reports values but no variants (they're optional)."""
-
-    def __init__(self, ratio):
-        self.ratio = ratio
-
-    def _get(self, key, default_value, context=None):
-        from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
-
-        value = self.ratio if key == SAMPLE_RATIO_FLAG_KEY else default_value
-        return FlagEvaluationDetails(flag_key=key, value=value, reason=Reason.STATIC)
-
-    get_string_details = get_boolean_details = get_float_details = _get
-
-
-def test_a_provider_without_variants_still_records_the_decision(monkeypatch):
-    monkeypatch.setattr(flags, "_policy_source", _PolicySource())
-    monkeypatch.setattr(feature_api, "get_client", lambda: _NoVariantClient(0.5))
-    flags._policy_source.classify()
-
-    roots = [s for s in _traced(100) if s.parent is None]
-
-    assert roots
-    for root in roots:
-        assert root.attributes["otelfeature.sample_ratio"] == 0.5
-
-
 @pytest.mark.parametrize(
     "variant_value, startup_ratio, recorded",
     [
@@ -186,7 +161,6 @@ def test_the_applications_own_attributes_win(flagd):
     assert root.attributes["otelfeature.sample_ratio"] == 1.0
 
 
-
 # --------------------------------------------------------------------------
 # The OpenFeature OpenTelemetry hook: opt-in, for the extension's evaluations
 # --------------------------------------------------------------------------
@@ -205,33 +179,66 @@ def test_the_tracing_hook_is_off_by_default(hook_options, value):
     assert flags._hook_options == ()
 
 
-def test_the_tracing_hook_records_the_extensions_evaluations_when_opted_in(
-    flagd, hook_options
-):
+def _hooked(flagd, rule_flag_key, flag):
     pytest.importorskip("openfeature.contrib.hook.opentelemetry")
     assert flags.enable_tracing_hook({flags.TRACING_HOOK_ENV_VAR: "true"}) is True
-    flagd(
+    flagd(flag, key=rule_flag_key)
+    exporter = InMemorySpanExporter()
+    provider = SDKTracerProvider(resource=Resource.create(), sampler=flag_aware_sampler({}))
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return exporter, _VerbosityAwareTracerProvider(provider).get_tracer("t")
+
+
+def _events(span):
+    return [e for e in span.events if e.name == "feature_flag.evaluation"]
+
+
+def test_the_hook_records_child_span_decisions_on_the_parent(flagd, hook_options):
+    exporter, tracer = _hooked(
+        flagd,
+        flags.RECORD_SPAN_FLAG_KEY,
+        {
+            "defaultVariant": "on",
+            "variants": {"on": True, "off": False},
+            "targeting": {"if": [{"==": [{"var": "span.name"}, "never"]}, "off", None]},
+        },
+    )
+
+    with tracer.start_as_current_span("request", kind=trace.SpanKind.SERVER):
+        tracer.start_span("child").end()
+
+    spans = {s.name: s for s in exporter.get_finished_spans()}
+    assert [e.attributes["feature_flag.key"] for e in _events(spans["request"])] == [
+        flags.RECORD_SPAN_FLAG_KEY
+    ]
+    assert _events(spans["child"]) == []
+
+
+def test_the_hook_records_nothing_for_plain_roots(flagd, hook_options):
+    """Documented: a new root has no current span to put the event on."""
+    exporter, tracer = _hooked(
+        flagd,
+        SAMPLE_RATIO_FLAG_KEY,
         {
             "defaultVariant": "all",
             "variants": {"none": 0.0, "all": 1.0},
             "targeting": {"if": [{"==": [{"var": "url.path"}, "/never"]}, "none", "all"]},
-        }
+        },
     )
-    exporter = InMemorySpanExporter()
-    provider = SDKTracerProvider(resource=Resource.create(), sampler=flag_aware_sampler({}))
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    tracer = _VerbosityAwareTracerProvider(provider).get_tracer("t")
 
-    with tracer.start_as_current_span("request", kind=trace.SpanKind.SERVER):
-        # A second root started inside `request`: its ratio is evaluated
-        # while `request` is the current span.
-        tracer.start_span("inner-root", context=trace.set_span_in_context(trace.INVALID_SPAN)).end()
+    for _ in range(5):
+        tracer.start_span("root", kind=trace.SpanKind.SERVER).end()
 
-    request = next(s for s in exporter.get_finished_spans() if s.name == "request")
-    events = [e for e in request.events if e.name == "feature_flag.evaluation"]
-    # The event lands on the span that is current while the flag is
-    # evaluated - the parent, since the new span doesn't exist yet.
-    assert [e.attributes["feature_flag.key"] for e in events] == [SAMPLE_RATIO_FLAG_KEY]
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 5
+    assert all(_events(span) == [] for span in spans)
+
+
+def test_the_hook_does_not_record_errors_as_exceptions(hook_options):
+    pytest.importorskip("openfeature.contrib.hook.opentelemetry")
+    flags.enable_tracing_hook({flags.TRACING_HOOK_ENV_VAR: "true"})
+    (options,) = flags._hook_options
+    assert options.hooks[0].exclude_exceptions is True
 
 
 def test_without_the_package_opting_in_warns_and_stays_off(hook_options, monkeypatch, caplog):

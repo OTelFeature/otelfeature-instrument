@@ -349,11 +349,18 @@ For the extension's own evaluations it can be switched on with
 `OTELFEATURE_OPENFEATURE_TRACING_HOOK=true` (install
 `otelfeature-instrument[tracing-hook]`). It is **off by default on
 purpose**: static flags are not evaluated at all, but a flag with
-targeting is evaluated per span (per root for `traceSampleRatio`), and
-each evaluation adds a `feature_flag.evaluation` event - to the span that
-is current at that moment, i.e. the *parent* of the span being decided.
-That is one event per span on a busy service: exactly the noise this
-project removes. Use it to debug a rule, not permanently.
+targeting is evaluated per span, and each evaluation adds a
+`feature_flag.evaluation` event. That is up to one event per span on a
+busy service: exactly the noise this project removes. Use it to debug a
+rule, not permanently.
+
+Where the events land: on the span that is current while the flag is
+evaluated - the **parent** of the span being decided, since that span
+doesn't exist yet. So targeted `otelEnabled` / `telemetryLevel` /
+`recordSpan` evaluations for child spans show up on their parent, while
+evaluations for a **new root** - including every `traceSampleRatio`
+evaluation - have no current span and record nothing. Evaluation errors
+are not recorded as exceptions on application spans.
 
 ### The evaluation context
 

@@ -115,7 +115,7 @@ class TelemetryPolicy:
         """Attributes recorded on a kept root span, so a backend can re-weight
         counts by the applied ratio. Which flag evaluated to what is not
         recorded here - that is the OpenFeature OpenTelemetry hook's job (see
-        `tracing_hook_options`). Built once per policy object, so a cached
+        `enable_tracing_hook`). Built once per policy object, so a cached
         policy never builds them again; read-only, since every root on the
         static path shares them."""
         if not self.sample_ratio_decided:
@@ -179,6 +179,12 @@ def enable_tracing_hook(environ: Mapping[str, str] = os.environ) -> bool:
     exactly the kind of noise this project exists to remove. Recording the
     application's own flag evaluations is the application's business (it
     registers the hook itself); this only covers the extension's.
+
+    The hook writes to the span that is current during the evaluation: the
+    *parent* of the span being decided. Evaluations for a new root (no
+    current span), `traceSampleRatio` among them, therefore record nothing.
+    Errors are not recorded as exceptions (`exclude_exceptions`): a flagd
+    outage would otherwise add one to an application span per evaluation.
     """
     global _hook_options
     if environ.get(TRACING_HOOK_ENV_VAR, "").strip().lower() != "true":
@@ -194,7 +200,7 @@ def enable_tracing_hook(environ: Mapping[str, str] = os.environ) -> bool:
         )
         _hook_options = ()
         return False
-    _hook_options = (FlagEvaluationOptions(hooks=[TracingHook()]),)
+    _hook_options = (FlagEvaluationOptions(hooks=[TracingHook(exclude_exceptions=True)]),)
     return True
 
 

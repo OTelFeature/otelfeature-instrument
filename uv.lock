@@ -734,7 +734,7 @@ tracing-hook = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "openfeature-hooks-opentelemetry" },
+    { name = "otelfeature-instrument", extra = ["tracing-hook"] },
     { name = "pytest" },
 ]
 
@@ -752,7 +752,7 @@ provides-extras = ["tracing-hook"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "openfeature-hooks-opentelemetry", specifier = "==0.3.1" },
+    { name = "otelfeature-instrument", extras = ["tracing-hook"] },
     { name = "pytest", specifier = "==9.1.1" },
 ]
 
