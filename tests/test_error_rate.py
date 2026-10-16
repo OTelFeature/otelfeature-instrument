@@ -266,6 +266,7 @@ def test_interval_from_environment(raw, expected):
 
 
 def test_install_meter_provider_wires_the_minimum_from_the_environment(monkeypatch):
+    monkeypatch.delenv(metrics.METRICS_EXPORTER_ENV_VAR, raising=False)
     built = []
     monkeypatch.setenv(error_rate.MIN_REQUESTS_ENV_VAR, "3")
     monkeypatch.setattr(metrics, "MeterProvider", lambda **kwargs: built.append(kwargs))
@@ -281,6 +282,7 @@ def test_install_meter_provider_wires_the_minimum_from_the_environment(monkeypat
 
 
 def test_install_meter_provider_adds_the_reader_next_to_otlp(monkeypatch):
+    monkeypatch.delenv(metrics.METRICS_EXPORTER_ENV_VAR, raising=False)
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 
     built, started = [], []
@@ -394,3 +396,31 @@ def test_dropping_below_the_minimum_removes_a_previous_rate():
 def test_min_requests_from_environment(raw, expected):
     environ = {} if raw is None else {error_rate.MIN_REQUESTS_ENV_VAR: raw}
     assert min_requests_from_environment(environ) == expected
+
+
+
+@pytest.mark.parametrize("value", ["none", " NONE ", "none,"])
+def test_metrics_exporter_none_installs_no_metrics_sdk_and_no_error_rate(monkeypatch, value):
+    """Metrics off means no metrics SDK: no reader, so the rate stays absent."""
+    monkeypatch.setenv(metrics.METRICS_EXPORTER_ENV_VAR, value)
+    monkeypatch.setattr(metrics, "MeterProvider", lambda **_: pytest.fail("built a MeterProvider"))
+    monkeypatch.setattr(metrics.metrics, "set_meter_provider", lambda _: pytest.fail("installed one"))
+    monkeypatch.setattr(ErrorRatePublisher, "start", lambda self: pytest.fail("started the publisher"))
+
+    metrics.install_meter_provider(Resource.create())
+
+    assert ERROR_RATE_KEY not in evaluation_context._live
+
+
+@pytest.mark.parametrize(
+    "environ, disabled",
+    [
+        ({}, False),
+        ({"OTEL_METRICS_EXPORTER": "otlp"}, False),
+        ({"OTEL_METRICS_EXPORTER": ""}, False),
+        ({"OTEL_METRICS_EXPORTER": "none"}, True),
+        ({"OTEL_METRICS_EXPORTER": "otlp,none"}, False),
+    ],
+)
+def test_metrics_disabled(environ, disabled):
+    assert metrics.metrics_disabled(environ) is disabled
