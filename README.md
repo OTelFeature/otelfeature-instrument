@@ -273,9 +273,18 @@ to 100% for this service for ten minutes" needs it live, so
 - **Parent-based.** A span with a parent follows the parent's decision; only
   a root asks the flag. A trace is never half sampled, even if the flag
   flips while it is in flight.
-- **Same rule as the SDK's `TraceIdRatioBased`:** the low 64 bits of the
-  trace id against a bound. Every service that applies the same ratio to
-  the same trace makes the same call.
+- **Same rule as the Python SDK's `TraceIdRatioBased`:** the low 64 bits
+  of the trace id, unsigned, against `ratio * 2^64`. Every Python service
+  that applies the same ratio to the same trace makes the same call.
+  **Not across languages:** the Java SDK (and so
+  `otelfeature-java-extension`) compares the low 64 bits as a *signed*
+  long against `ratio * Long.MAX_VALUE`, so at the same ratio Java and
+  Python can disagree on a given trace id. With parent-based sampling this
+  doesn't matter - only the entry service decides, everyone downstream
+  follows its `traceparent`. Where several entry services in different
+  languages must agree on the same traces, bucket with a flagd
+  `fractional` rule on `targetingKey` (the trace id), which every flagd
+  evaluator computes identically, and serve `0.0`/`1.0` per bucket.
 - **`0.0` is `always_off`**, `1.0` is `always_on` - no separate flag needed.
 - **Never throws on the hot path.** Out of range is clamped; a non-numeric
   or NaN value falls back to the startup value (logged once).
