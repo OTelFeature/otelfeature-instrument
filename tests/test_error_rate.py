@@ -25,6 +25,7 @@ from otelfeature_instrument.error_rate import (
     error_rate_reader,
     interval_from_environment,
     is_error,
+    min_requests_from_environment,
 )
 from otelfeature_instrument.evaluation_context import span_context
 from otelfeature_instrument.flags import SAMPLE_RATIO_FLAG_KEY, TelemetryPolicy, _PolicySource
@@ -63,7 +64,7 @@ def _live_rate():
 def test_k_of_n_failing_requests_publish_k_over_n():
     reader = error_rate_reader()
     service = _Service(reader)
-    publisher = ErrorRatePublisher(reader, interval=10)
+    publisher = ErrorRatePublisher(reader, interval=10, min_requests=1)
 
     for i in range(20):
         service.request(503 if i < 3 else 200)
@@ -76,7 +77,7 @@ def test_each_collection_is_its_own_window():
     """Delta temporality: the next collection only sees the requests since."""
     reader = error_rate_reader()
     service = _Service(reader)
-    publisher = ErrorRatePublisher(reader, interval=10)
+    publisher = ErrorRatePublisher(reader, interval=10, min_requests=1)
 
     for _ in range(10):
         service.request(500)
@@ -91,7 +92,7 @@ def test_each_collection_is_its_own_window():
 def test_no_requests_leaves_the_key_out():
     reader = error_rate_reader()
     service = _Service(reader)
-    publisher = ErrorRatePublisher(reader, interval=10)
+    publisher = ErrorRatePublisher(reader, interval=10, min_requests=1)
     service.request(500)
     publisher.collect_once()
     assert _live_rate() == 1.0
@@ -105,7 +106,7 @@ def test_pre_stable_metric_falls_back_to_the_status_code():
     """Without OTEL_SEMCONV_STABILITY_OPT_IN=http there is no error.type."""
     reader = error_rate_reader()
     service = _Service(reader, stable=False)
-    publisher = ErrorRatePublisher(reader, interval=10)
+    publisher = ErrorRatePublisher(reader, interval=10, min_requests=1)
 
     for status in (200, 404, 500, 502):
         service.request(status)
@@ -119,7 +120,7 @@ def test_dup_opt_in_counts_each_request_once():
     reader = error_rate_reader()
     stable = _Service(reader)
     old_histogram = stable.provider.get_meter("dup").create_histogram("http.server.duration")
-    publisher = ErrorRatePublisher(reader, interval=10)
+    publisher = ErrorRatePublisher(reader, interval=10, min_requests=1)
 
     for status in (200, 200, 200, 500):
         stable.request(status)
@@ -150,7 +151,7 @@ def test_the_otlp_view_is_unchanged_by_the_extra_reader():
     keeps cumulative totals, however often the delta reader collects."""
     otlp, ours = InMemoryMetricReader(), error_rate_reader()
     service = _Service(otlp, ours)
-    publisher = ErrorRatePublisher(ours, interval=10)
+    publisher = ErrorRatePublisher(ours, interval=10, min_requests=1)
 
     for _ in range(3):
         for i in range(5):
@@ -170,7 +171,7 @@ def test_the_timer_publishes_without_anyone_calling_it():
     service.request(500)
     service.request(200)
 
-    publisher = ErrorRatePublisher(reader, interval=0.02)
+    publisher = ErrorRatePublisher(reader, interval=0.02, min_requests=1)
     thread = publisher.start()
     try:
         deadline = time.monotonic() + 5
@@ -187,7 +188,7 @@ def test_span_sampling_does_not_change_the_measured_rate(monkeypatch):
     """Spans sampled down to 0: the rate comes from metrics, so it is unchanged."""
     reader = error_rate_reader()
     service = _Service(reader)
-    publisher = ErrorRatePublisher(reader, interval=10)
+    publisher = ErrorRatePublisher(reader, interval=10, min_requests=1)
     exporter = InMemorySpanExporter()
     monkeypatch.setattr(
         "otelfeature_instrument.sampling.cached_policy",
@@ -247,7 +248,7 @@ def test_the_otelfeature_namespace_cannot_be_faked_while_the_rate_is_absent(attr
 
 def test_a_failing_collection_keeps_the_loop_alive(monkeypatch, caplog):
     reader = error_rate_reader()
-    publisher = ErrorRatePublisher(reader, interval=10)
+    publisher = ErrorRatePublisher(reader, interval=10, min_requests=1)
     evaluation_context.set_live_attribute(ERROR_RATE_KEY, 0.9)
     monkeypatch.setattr(reader, "get_metrics_data", lambda: 1 / 0)
 
@@ -319,7 +320,7 @@ def test_real_flagd_rule_raises_sampling_when_the_error_rate_crosses_a_threshold
         flags._policy_source.classify()
         reader = error_rate_reader()
         service = _Service(reader)
-        publisher = ErrorRatePublisher(reader, interval=10)
+        publisher = ErrorRatePublisher(reader, interval=10, min_requests=1)
         exporter = InMemorySpanExporter()
         provider = SDKTracerProvider(resource=Resource.create(), sampler=flag_aware_sampler({}))
         provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -339,3 +340,43 @@ def test_real_flagd_rule_raises_sampling_when_the_error_rate_crosses_a_threshold
         assert window(0) == 0  # healthy again
     finally:
         feature_api.clear_providers()
+
+
+
+def test_below_the_minimum_request_count_no_rate_is_published():
+    """One failure in one request must not publish 1.0 and flip the loop."""
+    reader = error_rate_reader()
+    service = _Service(reader)
+    publisher = ErrorRatePublisher(reader, interval=10)  # default minimum: 10
+
+    service.request(500)
+    publisher.collect_once()
+    assert ERROR_RATE_KEY not in evaluation_context._live
+
+    for i in range(10):
+        service.request(500 if i < 2 else 200)
+    publisher.collect_once()
+    assert _live_rate() == pytest.approx(0.2)
+
+
+def test_dropping_below_the_minimum_removes_a_previous_rate():
+    reader = error_rate_reader()
+    service = _Service(reader)
+    publisher = ErrorRatePublisher(reader, interval=10, min_requests=5)
+    for _ in range(5):
+        service.request(500)
+    publisher.collect_once()
+    assert _live_rate() == 1.0
+
+    service.request(200)
+    publisher.collect_once()
+
+    assert ERROR_RATE_KEY not in evaluation_context._live
+
+
+@pytest.mark.parametrize(
+    "raw, expected", [(None, 10), ("", 10), ("25", 25), ("1", 1), ("0", 10), ("-3", 10), ("2.5", 10), ("x", 10)]
+)
+def test_min_requests_from_environment(raw, expected):
+    environ = {} if raw is None else {error_rate.MIN_REQUESTS_ENV_VAR: raw}
+    assert min_requests_from_environment(environ) == expected

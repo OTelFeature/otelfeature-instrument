@@ -10,6 +10,7 @@ from otelfeature_instrument.error_rate import (
     ErrorRatePublisher,
     error_rate_reader,
     interval_from_environment,
+    min_requests_from_environment,
 )
 
 
@@ -22,4 +23,6 @@ def install_meter_provider(resource: Resource) -> None:
         metric_readers=[PeriodicExportingMetricReader(OTLPMetricExporter()), error_reader],
     )
     metrics.set_meter_provider(meter_provider)
-    ErrorRatePublisher(error_reader, interval_from_environment()).start()
+    ErrorRatePublisher(
+        error_reader, interval_from_environment(), min_requests_from_environment()
+    ).start()

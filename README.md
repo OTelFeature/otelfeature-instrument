@@ -417,15 +417,15 @@ can close the loop on its own - no outside script, no new metric:
   seconds (default `10`). Each collection is its own window:
   `requests with error.type / all requests`. No smoothing. The OTLP reader,
   its temporality and what it exports are unchanged.
-- **No requests in the interval:** the key is left out of the context (a
-  rule comparing it then sees `null`, which is not `> 0.05`).
+- **Too few requests in the interval:** below
+  `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` (default `10`) the key is left out
+  of the context - a rule comparing it then sees `null`, which is not
+  `> 0.05`. One failure in one request can't publish `1.0` and flip the
+  loop.
 - **Per service:** each process measures and publishes its own rate, so a
   rule raises sampling for the service whose errors went up.
 - **Lags:** the rate a rule sees describes the *previous* interval, so it
   reacts one to two intervals after errors start.
-- **No minimum sample:** one failure in one request is a rate of `1.0`. On a
-  quiet service, guard the rule (or keep the interval long enough to
-  collect a meaningful number of requests).
 - **Span-start contexts only:** the key is merged into the contexts the
   extension builds for span decisions, not into OpenFeature evaluations the
   application makes itself.
@@ -454,6 +454,7 @@ can close the loop on its own - no outside script, no new metric:
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
 | `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections (see [Error rate](#error-rate-in-the-context)) |
+| `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10` | Minimum requests per interval before an error rate is published |
 | `OTEL_SEMCONV_STABILITY_OPT_IN` | -       | Set to `http` so the HTTP instrumentation emits `http.server.request.duration` with `error.type` |
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback ratio for `traceSampleRatio`; `always_off` / `parentbased_always_off` are hard floors no flag overrides; the sampler is parent-based and custom samplers are not loaded |
 

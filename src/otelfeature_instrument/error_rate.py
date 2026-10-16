@@ -11,8 +11,9 @@ Every `OTELFEATURE_ERROR_RATE_INTERVAL` seconds:
 
     error_rate = requests with error.type / all requests
 
-published as `otelfeature.http.server.error_rate` (absent while there were
-no requests). See "Error rate" in the README for the opt-in it relies on.
+published as `otelfeature.http.server.error_rate` - absent while fewer than
+`OTELFEATURE_ERROR_RATE_MIN_REQUESTS` (default 10) requests were seen, so one
+failure in one request can't publish 1.0. See "Error rate" in the README for the opt-in it relies on.
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ _logger = getLogger(__name__)
 ERROR_RATE_KEY = "otelfeature.http.server.error_rate"
 INTERVAL_ENV_VAR = "OTELFEATURE_ERROR_RATE_INTERVAL"
 DEFAULT_INTERVAL = 10.0
+MIN_REQUESTS_ENV_VAR = "OTELFEATURE_ERROR_RATE_MIN_REQUESTS"
+DEFAULT_MIN_REQUESTS = 10
 
 # Stable HTTP semconv first; the pre-stable name is what the Python HTTP
 # instrumentations emit without OTEL_SEMCONV_STABILITY_OPT_IN=http.
@@ -63,9 +66,9 @@ def is_error(attributes: Mapping[str, Any]) -> bool:
     return False
 
 
-def error_rate(data: MetricsData | None) -> float | None:
+def error_rate(data: MetricsData | None, min_requests: int = 1) -> float | None:
     """Σcount(error points) / Σcount(all points) over the HTTP server duration
-    histogram; `None` when there were no requests.
+    histogram; `None` when fewer than `min_requests` requests were seen.
 
     With OTEL_SEMCONV_STABILITY_OPT_IN=http/dup both metrics are recorded for
     the same requests, so only the first name in `_METRICS` that has data
@@ -86,21 +89,28 @@ def error_rate(data: MetricsData | None) -> float | None:
                         tally[0] += point.count
     for errors, total in counts.values():
         if total:
-            return errors / total
+            # Too few requests to say anything: no rate rather than a noisy one.
+            return errors / total if total >= min_requests else None
     return None
 
 
 class ErrorRatePublisher:
     """Collects the reader on a timer and publishes the rate into the context."""
 
-    def __init__(self, reader: InMemoryMetricReader, interval: float) -> None:
+    def __init__(
+        self,
+        reader: InMemoryMetricReader,
+        interval: float,
+        min_requests: int = DEFAULT_MIN_REQUESTS,
+    ) -> None:
         self._reader = reader
         self._interval = interval
+        self._min_requests = min_requests
         self._stopped = threading.Event()
 
     def collect_once(self) -> float | None:
         try:
-            rate = error_rate(self._reader.get_metrics_data())
+            rate = error_rate(self._reader.get_metrics_data(), self._min_requests)
         except Exception:  # noqa: BLE001 - never let the loop die
             _logger.exception("otelfeature-instrument: error-rate collection failed")
             rate = None
@@ -140,3 +150,22 @@ def interval_from_environment(environ: Mapping[str, str] = os.environ) -> float:
         DEFAULT_INTERVAL,
     )
     return DEFAULT_INTERVAL
+
+
+def min_requests_from_environment(environ: Mapping[str, str] = os.environ) -> int:
+    raw = environ.get(MIN_REQUESTS_ENV_VAR, "")
+    if not raw.strip():
+        return DEFAULT_MIN_REQUESTS
+    try:
+        count = int(raw)
+    except ValueError:
+        count = 0
+    if count >= 1:
+        return count
+    _logger.warning(
+        "otelfeature-instrument: %s=%r is not a positive whole number - using %s",
+        MIN_REQUESTS_ENV_VAR,
+        raw,
+        DEFAULT_MIN_REQUESTS,
+    )
+    return DEFAULT_MIN_REQUESTS
