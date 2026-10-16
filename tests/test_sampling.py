@@ -61,9 +61,7 @@ def test_startup_ratio_comes_from_the_sdk_environment(environ, ratio):
     [
         (None, None),
         ("parentbased_traceidratio", None),
-        ("parentbased_always_off", None),
         ("always_on", "applied parent-based"),
-        ("always_off", "applied parent-based"),
         ("traceidratio", "applied parent-based"),
         ("jaeger_remote", "custom samplers are not loaded"),
         ("", "custom samplers are not loaded"),
@@ -356,3 +354,47 @@ def test_children_never_evaluate_a_targeted_ratio(flagd, monkeypatch):
 
     assert len(evaluations) == 1
     assert len(exporter.get_finished_spans()) == 11
+
+
+
+SAMPLED_UPSTREAM = trace.set_span_in_context(
+    trace.NonRecordingSpan(
+        trace.SpanContext(
+            trace_id=0x1234,
+            span_id=0x5678,
+            is_remote=True,
+            trace_flags=trace.TraceFlags(trace.TraceFlags.SAMPLED),
+        )
+    )
+)
+
+
+@pytest.mark.parametrize(
+    "configured, root_sampled, upstream_sampled",
+    [
+        ("always_off", False, False),  # a hard floor: nothing, ever
+        ("parentbased_always_off", False, True),  # roots off; parents followed, as the SDK does
+    ],
+)
+def test_off_samplers_are_hard_floors_the_ratio_flag_cannot_lift(
+    monkeypatch, configured, root_sampled, upstream_sampled
+):
+    """Flags only ever reduce: traceSampleRatio=1.0 doesn't re-enable sampling."""
+    monkeypatch.setattr(sampling, "cached_policy", lambda **_: TelemetryPolicy(sample_ratio=1.0))
+    monkeypatch.setattr(tracing, "cached_policy", lambda **_: TelemetryPolicy(sample_ratio=1.0))
+    exporter = InMemorySpanExporter()
+    tracer = _tracer(exporter, sampler=flag_aware_sampler({"OTEL_TRACES_SAMPLER": configured}))
+
+    tracer.start_span("root", kind=trace.SpanKind.SERVER).end()
+    tracer.start_span("child-of-upstream", context=SAMPLED_UPSTREAM, kind=trace.SpanKind.SERVER).end()
+
+    exported = {span.name for span in exporter.get_finished_spans()}
+    assert ("root" in exported) is root_sampled
+    assert ("child-of-upstream" in exported) is upstream_sampled
+
+
+@pytest.mark.parametrize("configured", ["always_off", "parentbased_always_off"])
+def test_off_samplers_install_without_a_warning(configured, caplog):
+    with caplog.at_level("WARNING", logger=sampling.__name__):
+        flag_aware_sampler({"OTEL_TRACES_SAMPLER": configured})
+    assert caplog.records == []

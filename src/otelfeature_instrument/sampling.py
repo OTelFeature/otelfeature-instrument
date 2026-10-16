@@ -22,6 +22,8 @@ from typing import Mapping, Sequence
 
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace.sampling import (
+    ALWAYS_OFF,
+    DEFAULT_OFF,
     Decision,
     ParentBased,
     Sampler,
@@ -83,14 +85,29 @@ class _FlagRatioSampler(Sampler):
 
 
 def flag_aware_sampler(environ: Mapping[str, str] = os.environ) -> Sampler:
-    """The sampler `install_tracer_provider` installs - always parent-based.
+    """The sampler `install_tracer_provider` installs - parent-based.
 
-    OTEL_TRACES_SAMPLER only supplies the fallback ratio (see
-    `TelemetryPolicy.from_environment`). Where the configured sampler would
-    have behaved differently - not parent-based, or not a built-in at all -
-    that is logged once, here, at startup.
+    OTEL_TRACES_SAMPLER supplies the fallback ratio (see
+    `TelemetryPolicy.from_environment`), except for the two "off" samplers,
+    which are hard floors - flags only ever reduce telemetry, they never
+    enable what the environment switched off (the same rule as
+    OTEL_SDK_DISABLED):
+
+    - `always_off`: nothing is sampled - not by `traceSampleRatio`, not via
+      a sampled upstream parent. The SDK's own ALWAYS_OFF is installed.
+    - `parentbased_always_off`: no trace *starts* sampled here, whatever
+      `traceSampleRatio` says; spans with a parent follow it, exactly as the
+      SDK's sampler of that name does.
+
+    Where the configured sampler would otherwise have behaved differently -
+    not parent-based, or not a built-in at all - that is logged once, here,
+    at startup.
     """
     configured = environ.get("OTEL_TRACES_SAMPLER", "parentbased_always_on").lower()
+    if configured == "always_off":
+        return ALWAYS_OFF
+    if configured == "parentbased_always_off":
+        return DEFAULT_OFF
     if configured not in RATIO_SAMPLERS:
         # The plain SDK provider never loads sampler entry points either: an
         # unknown name already meant parentbased_always_on before.

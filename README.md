@@ -280,11 +280,16 @@ to 100% for this service for ten minutes" needs it live, so
 - **Never throws on the hot path.** Out of range is clamped; a non-numeric
   or NaN value falls back to the startup value (logged once).
 - **Startup fallback** is the ratio `OTEL_TRACES_SAMPLER`/`_ARG` amount to,
-  parsed as the SDK parses them (`always_off` is `0.0`, `traceidratio` its
-  argument, anything else `1.0`). The sampler itself is always
-  parent-based: with a non-parent-based `always_on`, `always_off` or
-  `traceidratio`, a span with a sampled parent is sampled whatever the
-  ratio - logged as a warning at startup. Custom samplers (entry points such
+  parsed as the SDK parses them (`traceidratio` its argument, anything else
+  `1.0`). The sampler itself is parent-based: with a non-parent-based
+  `always_on` or `traceidratio`, a span with a sampled parent is sampled
+  whatever the ratio - logged as a warning at startup.
+- **`always_off` is a hard floor**, like `OTEL_SDK_DISABLED`: flags never
+  enable what the env var switched off. With `OTEL_TRACES_SAMPLER=always_off`
+  nothing is sampled - not by `traceSampleRatio`, not via a sampled upstream
+  parent. With `parentbased_always_off` no trace starts sampled in this
+  service, whatever the flag says; spans with a parent follow it, as the
+  SDK's sampler of that name does. Custom samplers (entry points such
   as `jaeger_remote`) are not loaded by `otelfeature-instrument` - an
   unknown name falls back to `1.0`, as the plain SDK provider would.
 - **Only roots evaluate it.** A span with a parent never asks
@@ -388,7 +393,7 @@ flag while it is being used, not left on permanently.
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | flagd key of the selective-drop flag |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
-| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback ratio for `traceSampleRatio`; the sampler is always parent-based and custom samplers are not loaded |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback ratio for `traceSampleRatio`; `always_off` / `parentbased_always_off` are hard floors no flag overrides; the sampler is parent-based and custom samplers are not loaded |
 
 The `telemetryLevel` (variants `FULL`/`IO`/`OFF`) and `otelEnabled` (boolean)
 flags should exist in whatever flagd instance `FLAGD_HOST`/`FLAGD_PORT` point
