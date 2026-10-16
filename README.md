@@ -554,8 +554,8 @@ at - a missing one simply falls back to its startup value. See
 [poc-otelfeature/src/flagd](https://github.com/OTelFeature/poc/tree/main/src/flagd)
 for an example flag definition.
 
-Which `OTEL_*` variables a flag can replace live, and which stay startup-only
-or hard floors, is listed in the poc README:
+Which `OTEL_*` variables a flag can replace live, which cannot (and why), and
+the two hard floors are listed in the poc README:
 [Which `OTEL_*` env vars can be live flags](https://github.com/OTelFeature/poc#which-otel_-env-vars-can-be-live-flags).
 
 ## Development
