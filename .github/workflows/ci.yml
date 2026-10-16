@@ -1,0 +1,39 @@
+# Tests in the toolchain image (ci/Dockerfile) - the same image and the same
+# command as `make test` locally, so CI and developer runs cannot drift. No
+# setup-python/setup-uv on the runner: the image is the toolchain.
+name: CI
+
+on:
+  pull_request: # every PR, including ones stacked on other feature branches
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Layers come from the GitHub Actions cache: the dependency layer is
+      # only rebuilt when pyproject.toml/uv.lock (or the base image) change.
+      - name: Build the toolchain image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ci/Dockerfile
+          tags: otelfeature-instrument-ci
+          load: true
+          cache-from: type=gha,scope=ci-image
+          cache-to: type=gha,mode=max,scope=ci-image
+
+      - name: Test
+        run: make test-only

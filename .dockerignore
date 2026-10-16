@@ -1,0 +1,5 @@
+# The image only needs the lock files (ci/Dockerfile); the checkout is
+# mounted at run time. A tiny context keeps builds fast and cache keys stable.
+*
+!pyproject.toml
+!uv.lock
