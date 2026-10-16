@@ -84,7 +84,7 @@ class _RecordingClient:
         index = min(len(self.calls) - 1, len(self._responses) - 1)
         return self._responses[index]
 
-    get_boolean_details = get_string_details
+    get_boolean_details = get_float_details = get_string_details
 
 
 # --------------------------------------------------------------------------
@@ -641,6 +641,7 @@ class _FlagClient:
 
     get_string_details = _get
     get_boolean_details = _get
+    get_float_details = _get
 
 
 @pytest.mark.parametrize(
@@ -676,7 +677,7 @@ def test_static_flags_serve_one_cached_policy():
         evaluations = client.calls
         policies = [source.current() for _ in range(5)]
 
-    assert client.calls == evaluations == 3  # one probe per flag
+    assert client.calls == evaluations == 4  # one probe per flag
     assert all(policy is source.cached for policy in policies)
     assert source.cached == TelemetryPolicy(enabled=True, suppress_internal=True)
 
@@ -793,7 +794,8 @@ def test_a_missing_flag_is_logged_once_at_info(caplog):
 
     not_defined = [r for r in caplog.records if "is not defined" in r.getMessage()]
     assert sorted(r.getMessage().split()[1] for r in not_defined) == sorted(
-        [OTEL_ENABLED_FLAG_KEY, TRACE_VERBOSITY_FLAG_KEY, flags.RECORD_SPAN_FLAG_KEY]
+        [OTEL_ENABLED_FLAG_KEY, TRACE_VERBOSITY_FLAG_KEY, flags.RECORD_SPAN_FLAG_KEY,
+         flags.SAMPLE_RATIO_FLAG_KEY]
     )
     assert {r.levelname for r in not_defined} == {"INFO"}
 
@@ -812,7 +814,7 @@ def test_disabled_does_not_evaluate_telemetry_level():
         asked.append(key)
         return original(key, default_value, context)
 
-    client.get_string_details = client.get_boolean_details = spy
+    client.get_string_details = client.get_boolean_details = client.get_float_details = spy
     source = _PolicySource()
 
     with patch.object(feature_api, "get_client", return_value=client):
@@ -853,6 +855,9 @@ def test_concurrent_classifications_leave_the_latest_answer_cached():
         def get_boolean_details(self, key, default_value, context=None):
             return FlagEvaluationDetails(flag_key=key, value=True, reason=Reason.STATIC)
 
+        def get_float_details(self, key, default_value, context=None):
+            return FlagEvaluationDetails(flag_key=key, value=1.0, reason=Reason.STATIC)
+
     source = _PolicySource()
     with patch.object(feature_api, "get_client", return_value=_Client()):
         older = threading.Thread(target=source.classify)
@@ -889,7 +894,7 @@ def test_a_missing_flag_is_logged_once_even_when_classified(caplog):
         _PolicySource().classify(EventDetails())
 
     messages = [r.getMessage() for r in caplog.records]
-    assert len(messages) == 3  # one "is not defined" per flag, nothing else
+    assert len(messages) == 4  # one "is not defined" per flag, nothing else
     assert all("is not defined" in m for m in messages)
 
 

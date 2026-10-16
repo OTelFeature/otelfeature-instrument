@@ -35,6 +35,7 @@ from otelfeature_instrument.evaluation_context import (
     span_context,
 )
 from otelfeature_instrument.flags import TelemetryPolicy, cached_policy, current_policy
+from otelfeature_instrument.sampling import flag_aware_sampler, handover
 
 
 _logger = getLogger(__name__)
@@ -182,16 +183,18 @@ class _VerbosityAwareTracer(Tracer):
         if decision == _DROP_TRACE:
             # A dropped root keeps the trace id it was evaluated on.
             return self._drop(context, root_id, kind=kind)
-        if root_id is None:
-            return self._wrapped.start_span(*args)
-        # Set only around the one call that consumes it: anything that started
-        # a span during the flag evaluation above (a hook, an instrumented
-        # provider) must not have picked this id up.
-        self._ids.preset(root_id)
+        # Both handovers are set only around the one call that consumes them:
+        # anything that started a span during the flag evaluation above (a
+        # hook, an instrumented provider) must not have picked them up.
+        if root_id is not None:
+            self._ids.preset(root_id)
+        handover(policy)
         try:
             return self._wrapped.start_span(*args)
         finally:
-            self._ids.preset(None)
+            handover(None)
+            if root_id is not None:
+                self._ids.preset(None)
 
     def start_span(
         self,
@@ -310,6 +313,7 @@ class _VerbosityAwareTracerProvider(TracerProvider):
 
 
 def install_tracer_provider(resource: Resource) -> None:
-    provider = SDKTracerProvider(resource=resource)
+    # `None` leaves the SDK's own OTEL_TRACES_SAMPLER handling in charge.
+    provider = SDKTracerProvider(resource=resource, sampler=flag_aware_sampler())
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     trace.set_tracer_provider(_VerbosityAwareTracerProvider(provider))
