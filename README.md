@@ -153,15 +153,17 @@ Enforcement points never read a flag directly. `current_policy()` in
 
 | Field               | From                                          | Fallback                          |
 |---------------------|-----------------------------------------------|-----------------------------------|
-| `enabled`           | `otelEnabled` and `telemetryLevel != OFF`      | `OTEL_SDK_DISABLED` is not `true` |
+| `enabled`           | `otelEnabled` and `telemetryLevel != OFF`      | `OTEL_SDK_DISABLED` is not `true` (a hard floor) |
 | `suppress_internal` | `telemetryLevel == IO`                        | `false`                           |
 
 **Every field falls back to its startup value**, resolved from the
 environment once when the process starts. With flagd unreachable or a flag
 undefined, behaviour is that of plain `opentelemetry-instrument`; flags are a
-live override, never a replacement. (`OTEL_SDK_DISABLED=true` disables the
-OpenTelemetry SDK itself, so a flag cannot turn tracing back on there - the
-fallback just keeps the policy consistent with it.)
+live override, never a replacement.
+
+`OTEL_SDK_DISABLED=true` is the one exception, and a hard floor: flags never
+enable what `OTEL_SDK_DISABLED` turned off. `enabled` stays `false` whatever
+`otelEnabled` or `telemetryLevel` say, and no flag is evaluated at all.
 
 Provider errors and missing flags are logged once when they start - a missing
 flag at `INFO`, anything else at `WARNING` - and once when the flag becomes
@@ -219,7 +221,7 @@ evaluation: the right answer, just not yet the cheap one.
 | `FLAGD_HOST`                  | `localhost`| flagd host                                                       |
 | `FLAGD_PORT`                  | `8015`     | flagd gRPC sync port (in-process resolver)                       |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
-| `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; also the fallback for `TelemetryPolicy.enabled` |
+| `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
 
 The `telemetryLevel` (variants `FULL`/`IO`/`OFF`) and `otelEnabled` (boolean)
 flags should exist in whatever flagd instance `FLAGD_HOST`/`FLAGD_PORT` point

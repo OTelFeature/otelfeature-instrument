@@ -284,6 +284,11 @@ class _PolicySource:
         self._disabled = TelemetryPolicy(
             enabled=False, suppress_internal=self.defaults.suppress_internal
         )
+        # OTEL_SDK_DISABLED=true is a hard floor: flags only ever reduce
+        # telemetry, they never enable what the environment turned off.
+        self._floor = not self.defaults.enabled
+        if self._floor:
+            self._cached = self._disabled
 
     @property
     def cached(self) -> TelemetryPolicy | None:
@@ -295,6 +300,8 @@ class _PolicySource:
         Serialised: the SDK dispatches events on a thread pool, and the last
         classification to *start* must be the one that ends up cached.
         """
+        if self._floor:
+            return
         with self._classify_lock:
             self.enabled.classify(details)
             self.level.classify(details)

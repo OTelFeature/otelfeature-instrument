@@ -709,11 +709,30 @@ def test_missing_flags_fall_back_to_startup_values_per_field():
 
 
 def test_a_defined_flag_overrides_its_startup_value():
-    source = _PolicySource(TelemetryPolicy.from_environment({"OTEL_SDK_DISABLED": "true"}))
-    client = _FlagClient(otelEnabled=(True, Reason.STATIC))
+    source = _PolicySource(TelemetryPolicy(suppress_internal=True))
+    client = _FlagClient(telemetryLevel=(VERBOSITY_FULL, Reason.STATIC))
 
     with patch.object(feature_api, "get_client", return_value=client):
         assert source.current() == TelemetryPolicy(enabled=True, suppress_internal=False)
+
+
+@pytest.mark.parametrize(
+    "otel_enabled, level",
+    [(True, VERBOSITY_FULL), (True, VERBOSITY_IO), (False, VERBOSITY_FULL)],
+)
+def test_otel_sdk_disabled_is_a_hard_floor(otel_enabled, level):
+    """Flags never enable what OTEL_SDK_DISABLED turned off - and aren't even asked."""
+    source = _PolicySource(TelemetryPolicy.from_environment({"OTEL_SDK_DISABLED": "true"}))
+    client = _FlagClient(
+        otelEnabled=(otel_enabled, Reason.STATIC), telemetryLevel=(level, Reason.STATIC)
+    )
+
+    with patch.object(feature_api, "get_client", return_value=client):
+        source.classify(EventDetails())
+        assert source.current().enabled is False
+        assert source.cached.enabled is False
+
+    assert client.calls == 0
 
 
 def test_unknown_level_keeps_the_startup_value():
