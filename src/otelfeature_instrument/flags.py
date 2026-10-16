@@ -29,9 +29,10 @@ from __future__ import annotations
 import math
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import cached_property
 from logging import getLogger
-from typing import Mapping
+from typing import Any, Mapping
 
 from openfeature import api as feature_api
 from openfeature.contrib.provider.flagd import FlagdProvider
@@ -103,6 +104,23 @@ class TelemetryPolicy:
     record_span: bool = True
     # Probability that a new trace is sampled. From `traceSampleRatio`.
     sample_ratio: float = 1.0
+    # The `traceSampleRatio` variant behind `sample_ratio` when that is a
+    # non-default decision - the flag set it, to something other than the
+    # startup value. `None` otherwise, and then nothing is recorded on spans.
+    sample_ratio_variant: str | None = field(default=None)
+
+    @cached_property
+    def decision_attributes(self) -> Mapping[str, Any] | None:
+        """Attributes recorded on a kept root span, so a backend can tell which
+        flag decided and re-weight counts by the ratio. Built once per policy
+        object, so a cached policy never allocates them again."""
+        if self.sample_ratio_variant is None:
+            return None
+        return {
+            "feature_flag.key": SAMPLE_RATIO_FLAG_KEY,
+            "feature_flag.result.variant": self.sample_ratio_variant,
+            "otelfeature.sample_ratio": self.sample_ratio,
+        }
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] = os.environ) -> TelemetryPolicy:
@@ -231,7 +249,11 @@ class _CachingResolver:
         # provider later is picked up without restarting anything.
         details = self._read(feature_api.get_client(), context)
         self._report(details)
-        return self._normalise(details.value), details
+        return self._answer(details), details
+
+    def _answer(self, details: FlagEvaluationDetails):
+        """What is cached and served for this flag."""
+        return self._normalise(details.value)
 
     def _report(self, details: FlagEvaluationDetails) -> None:
         error = details.error_code
@@ -318,6 +340,13 @@ class _SampleRatioResolver(_CachingResolver):
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
         return client.get_float_details(self.flag_key, self.default, context)
 
+    def _answer(self, details: FlagEvaluationDetails) -> tuple[float, str | None]:
+        # The variant travels with the ratio so a kept root can record which
+        # one decided; `None` when the flag couldn't be read and the startup
+        # value is served instead.
+        variant = details.variant if details.error_code is None else None
+        return self._normalise(details.value), variant
+
     def _normalise(self, value) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
             self._warn_once(value, "is not a number - using the startup value")
@@ -370,6 +399,7 @@ class _PolicySource:
         )
         self.record = _RecordSpanResolver(self.defaults.record_span)
         self.ratio = _SampleRatioResolver(self.defaults.sample_ratio)
+        self._default_ratio = (self.defaults.sample_ratio, None)
         # Same contract as `_CachingResolver._cached`: set only while every
         # input flag is cached, so the static path stays one attribute read
         # and allocates nothing.
@@ -420,9 +450,7 @@ class _PolicySource:
             if enabled is None or level is None or record is None:
                 self._cached = self._cached_child = None
                 return
-            self._cached_child = self._combine(
-                enabled, level, self.defaults.sample_ratio, record
-            )
+            self._cached_child = self._combine(enabled, level, self._default_ratio, record)
             self._cached = (
                 None if ratio is None else self._combine(enabled, level, ratio, record)
             )
@@ -442,11 +470,11 @@ class _PolicySource:
         level = self.level.current(context)
         if level == VERBOSITY_OFF:
             return self._disabled
-        ratio = self.ratio.current(context) if root else self.defaults.sample_ratio
+        ratio = self.ratio.current(context) if root else self._default_ratio
         return self._combine(enabled, level, ratio, self.record.current(context))
 
     def _combine(
-        self, enabled: bool, level: str, ratio: float, record: bool = True
+        self, enabled: bool, level: str, ratio: tuple[float, str | None], record: bool = True
     ) -> TelemetryPolicy:
         # Precedence: OTEL_SDK_DISABLED (the floor, see __init__) >
         # otelEnabled / telemetryLevel=OFF > recordSpan.
@@ -459,11 +487,15 @@ class _PolicySource:
         suppress_internal = {VERBOSITY_FULL: False, VERBOSITY_IO: True}.get(
             level, self.defaults.suppress_internal
         )
+        value, variant = ratio
         return TelemetryPolicy(
             enabled=True,
             suppress_internal=suppress_internal,
             record_span=record,
-            sample_ratio=ratio,
+            sample_ratio=value,
+            # A decision is only worth recording when the flag moved the
+            # ratio away from what the process would do anyway.
+            sample_ratio_variant=variant if value != self.defaults.sample_ratio else None,
         )
 
 

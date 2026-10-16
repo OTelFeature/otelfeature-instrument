@@ -72,9 +72,14 @@ class _FlagRatioSampler(Sampler):
         links: Sequence[Link] | None = None,
         trace_state: TraceState | None = None,
     ) -> SamplingResult:
-        ratio = _policy().sample_ratio
-        bound = TraceIdRatioBased.get_bound_for_rate(ratio)
+        policy = _policy()
+        bound = TraceIdRatioBased.get_bound_for_rate(policy.sample_ratio)
         if trace_id & TraceIdRatioBased.TRACE_ID_LIMIT < bound:
+            decision = policy.decision_attributes
+            if decision is not None:
+                # The SDK takes the span's attributes from the sampling
+                # result, so the start attributes are carried over.
+                attributes = {**attributes, **decision} if attributes else decision
             return SamplingResult(
                 Decision.RECORD_AND_SAMPLE, attributes, _get_parent_trace_state(parent_context)
             )

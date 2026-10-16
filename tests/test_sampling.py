@@ -108,7 +108,7 @@ def test_out_of_range_clamps_and_non_numbers_fall_back(value, expected):
             return FlagEvaluationDetails(flag_key=key, value=value, reason=Reason.STATIC)
 
     with patch.object(feature_api, "get_client", return_value=_Client()):
-        assert resolver.current() == expected
+        assert resolver.current()[0] == expected
 
 
 @pytest.mark.parametrize("bad", [3.0, math.nan])
