@@ -27,7 +27,8 @@ from openfeature.contrib.provider.flagd import FlagdProvider
 from openfeature.contrib.provider.flagd.config import ResolverType
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import EventDetails, ProviderEvent
-from openfeature.flag_evaluation import Reason
+from openfeature.exception import ErrorCode
+from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
 
 _logger = getLogger(__name__)
 
@@ -86,12 +87,18 @@ class _CachingResolver:
         if changed and self.flag_key not in changed:
             return
 
-        value, reason = self._evaluate()
+        value, details = self._evaluate()
+        reason = details.reason
         previous = self._cached
         # Deliberately `STATIC` only. TARGETING_MATCH and DEFAULT both mean a
         # targeting block ran, so the answer belongs to one evaluation context
-        # and not to the process; DISABLED and ERROR are not worth betting on.
-        self._cached = value if reason == Reason.STATIC else None
+        # and not to the process; DISABLED and other errors are not worth
+        # betting on. The one exception is a flag that doesn't exist: that is
+        # the normal state of a deployment that never defined it, the fail-open
+        # default is the whole answer, and creating the flag later lists it in
+        # `flags_changed`, which re-classifies.
+        cacheable = reason == Reason.STATIC or details.error_code == ErrorCode.FLAG_NOT_FOUND
+        self._cached = value if cacheable else None
 
         if self._cached != previous:
             if self._cached is None:
@@ -118,8 +125,10 @@ class _CachingResolver:
             return cached
         return self._evaluate(context)[0]
 
-    def _evaluate(self, context: EvaluationContext | None = None) -> tuple[object, object]:
-        """Return `(value, reason)`.
+    def _evaluate(
+        self, context: EvaluationContext | None = None
+    ) -> tuple[object, FlagEvaluationDetails]:
+        """Return the normalised value and the raw evaluation details.
 
         Implementations always read the live global provider rather than
         something captured at configure_feature_flags() time, so an app that
@@ -134,11 +143,13 @@ class _VerbosityResolver(_CachingResolver):
 
     flag_key = TRACE_VERBOSITY_FLAG_KEY
 
-    def _evaluate(self, context: EvaluationContext | None = None) -> tuple[str, object]:
+    def _evaluate(
+        self, context: EvaluationContext | None = None
+    ) -> tuple[str, FlagEvaluationDetails]:
         details = feature_api.get_client().get_string_details(
             self.flag_key, VERBOSITY_FULL, context
         )
-        return (details.value or VERBOSITY_FULL).strip().upper(), details.reason
+        return (details.value or VERBOSITY_FULL).strip().upper(), details
 
 
 class _EnabledResolver(_CachingResolver):
@@ -146,14 +157,15 @@ class _EnabledResolver(_CachingResolver):
 
     flag_key = OTEL_ENABLED_FLAG_KEY
 
-    def _evaluate(self, context: EvaluationContext | None = None) -> tuple[bool, object]:
+    def _evaluate(
+        self, context: EvaluationContext | None = None
+    ) -> tuple[bool, FlagEvaluationDetails]:
         # A missing flag, a provider error or a non-boolean variant all come
-        # back from the SDK as our default `True` (reason ERROR); `is not False`
-        # also covers a provider that hands back `None`.
+        # back from the SDK as our default `True` (reason ERROR).
         details = feature_api.get_client().get_boolean_details(
             self.flag_key, True, context
         )
-        return details.value is not False, details.reason
+        return details.value is not False, details
 
 
 _resolver = _VerbosityResolver()

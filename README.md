@@ -117,17 +117,22 @@ OpenTelemetry's own kill switch, `OTEL_SDK_DISABLED`, is read once at process
 start; `OFF` and `otelEnabled=false` flip at runtime instead, but they are
 not the same thing:
 
-- **Context propagation keeps working.** A suppressed span hands back the
-  incoming parent unchanged and keeps it current, so `traceparent` is still
+- **Context propagation keeps working.** A suppressed span stands in for
+  the incoming parent (as a non-recording span with the same context) and
+  keeps that parent current, so an incoming `traceparent` is still
   forwarded downstream and a trace resumes coherently the moment the flag
-  flips back. For an incident-response kill switch that is a feature.
-- **CPU is saved too, in Python.** Suppression happens at span creation: no
-  span object is built, populated, processed or exported. (This differs from
-  span-processor-based implementations, which still pay for creating the
-  span before dropping it.)
-- The SDK, its exporters and the instrumentation stay installed; only the
-  per-span flag lookups remain, and those are answered from memory while the
-  flags are static.
+  flips back. For an incident-response kill switch that is a feature. Two
+  consequences: while off, this service drops out of the trace (downstream
+  spans attach to its caller), and a request that arrived without a
+  `traceparent` propagates none.
+- **Most of the CPU is saved too, in Python.** Suppression happens at span
+  creation: no SDK span is created, recorded, processed or exported. (This
+  differs from span-processor-based implementations, which still pay for
+  creating the span before dropping it.) What remains is instrumentation
+  glue - extracting headers, building attribute dicts that are written to a
+  no-op span - plus the per-span flag lookups, which are answered from
+  memory while the flags are static or absent.
+- The SDK, its exporters and the instrumentation stay installed.
 
 ### The feature flag
 
@@ -157,8 +162,12 @@ resolution `reason`, and that reason is the entire mechanism:
 So the flag is evaluated **once, from the provider's event handler, without
 an evaluation context**, purely to read the reason back:
 
-- `STATIC` - and only `STATIC` - is kept. Every subsequent span is answered
-  from memory, evaluating nothing and running no hooks.
+- `STATIC` is kept. Every subsequent span is answered from memory,
+  evaluating nothing and running no hooks.
+- So is an `ERROR` whose code is `FLAG_NOT_FOUND`: a deployment that never
+  defined the flag gets the fail-open default from memory instead of a
+  failing evaluation per span. Creating the flag later lists it in the
+  configuration-changed event, which re-classifies.
 - Anything else means the value can depend on who's asking, so every span
   evaluates for itself.
 

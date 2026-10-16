@@ -31,6 +31,14 @@ from otelfeature_instrument.flags import (
 )
 
 
+def _stand_in(span: Span) -> Span:
+    # Same context as the real parent - so propagation and child parenting are
+    # unchanged - but non-recording: whatever the caller does to "its" span
+    # (attributes, status, `end()`) must not land on a parent that is still
+    # recording, e.g. when the flag flips mid-request.
+    return trace.NonRecordingSpan(span.get_span_context())
+
+
 class _VerbosityAwareTracer(Tracer):
     def __init__(self, wrapped: Tracer) -> None:
         self._wrapped = wrapped
@@ -57,7 +65,7 @@ class _VerbosityAwareTracer(Tracer):
         set_status_on_exception: bool = True,
     ) -> Span:
         if self._suppress(kind):
-            return trace.get_current_span(context)
+            return _stand_in(trace.get_current_span(context))
         return self._wrapped.start_span(
             name,
             context,
@@ -84,14 +92,14 @@ class _VerbosityAwareTracer(Tracer):
     ) -> Iterator[Span]:
         if self._suppress(kind):
             if context is None:
-                yield trace.get_current_span()
+                yield _stand_in(trace.get_current_span())
                 return
             # An explicit context is how server instrumentation hands over the
             # extracted remote parent. Make it current, exactly as a real span
             # would have, so children and outgoing propagation still see it.
             token = otel_context.attach(context)
             try:
-                yield trace.get_current_span(context)
+                yield _stand_in(trace.get_current_span(context))
             finally:
                 otel_context.detach(token)
             return

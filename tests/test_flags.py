@@ -21,6 +21,7 @@ from openfeature.contrib.provider.flagd import FlagdProvider
 from openfeature.contrib.provider.flagd.config import ResolverType
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import EventDetails, ProviderEvent
+from openfeature.exception import ErrorCode
 from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
 
 from otelfeature_instrument import flags
@@ -285,21 +286,59 @@ def test_otel_enabled_ignores_changes_to_other_flags():
     assert len(client.calls) == 1
 
 
-@pytest.mark.parametrize("value", [True, None])
-def test_otel_enabled_fails_open(value):
-    """Anything but an explicit `false` - including the SDK's error default - enables."""
-    client = _RecordingClient(_bool_details(value, Reason.ERROR))
+@pytest.fixture
+def no_provider():
+    feature_api.clear_providers()
+    yield
+    feature_api.clear_providers()
+
+
+def test_otel_enabled_with_no_provider_is_enabled(no_provider):
+    """No provider registered at all: the SDK's no-op provider serves our default."""
+    assert _EnabledResolver().current() is True
+    assert _VerbosityResolver().current() == VERBOSITY_FULL
+
+
+@pytest.mark.parametrize(
+    "resolver_type, default",
+    [(_EnabledResolver, True), (_VerbosityResolver, VERBOSITY_FULL)],
+)
+def test_a_missing_flag_caches_the_fail_open_default(resolver_type, default):
+    """Deployments that never defined the flag must not pay a failing evaluation per span."""
+    client = _RecordingClient(
+        FlagEvaluationDetails(
+            flag_key=resolver_type.flag_key,
+            value=default,
+            reason=Reason.ERROR,
+            error_code=ErrorCode.FLAG_NOT_FOUND,
+        )
+    )
+    resolver = resolver_type()
+
+    with patch.object(feature_api, "get_client", return_value=client):
+        resolver.classify(EventDetails())
+        values = [resolver.current() for _ in range(5)]
+
+    assert values == [default] * 5
+    assert len(client.calls) == 1
+
+
+def test_other_errors_are_not_cached():
+    client = _RecordingClient(
+        FlagEvaluationDetails(
+            flag_key=OTEL_ENABLED_FLAG_KEY,
+            value=True,
+            reason=Reason.ERROR,
+            error_code=ErrorCode.PROVIDER_NOT_READY,
+        )
+    )
     resolver = _EnabledResolver()
 
     with patch.object(feature_api, "get_client", return_value=client):
+        resolver.classify(EventDetails())
         assert resolver.current() is True
 
-
-def test_otel_enabled_with_no_provider_is_enabled():
-    """No provider registered at all: the SDK's no-op provider serves our default."""
-    feature_api.clear_providers()
-    assert _EnabledResolver().current() is True
-    assert _VerbosityResolver().current() == VERBOSITY_FULL
+    assert resolver.cached is None
 
 
 # --------------------------------------------------------------------------
@@ -544,3 +583,33 @@ def test_real_flagd_non_boolean_otel_enabled_fails_open(flag_file: Path, flagd_p
 
     assert _wait_for(loaded), "flagd never picked up the otelEnabled flag"
     assert _EnabledResolver().current() is True
+
+
+def test_real_flagd_missing_otel_enabled_is_cached_until_it_is_created(
+    flag_file: Path, flagd_provider
+):
+    """The upgrade path: no `otelEnabled` yet, then someone adds it in flagd."""
+    resolver = _EnabledResolver()
+    for event in _RECLASSIFY_ON:
+        feature_api.add_handler(event, resolver.classify)
+    try:
+        assert _wait_for(lambda: resolver.cached is True), "missing flag never cached"
+
+        flag_file.write_text(
+            json.dumps(
+                _with_otel_enabled(
+                    {
+                        "state": "ENABLED",
+                        "defaultVariant": "off",
+                        "variants": {"on": True, "off": False},
+                    }
+                )
+            ),
+            encoding="utf-8",
+        )
+        assert _wait_for(
+            lambda: resolver.cached is False
+        ), "creating the flag never re-classified"
+    finally:
+        for event in _RECLASSIFY_ON:
+            feature_api.remove_handler(event, resolver.classify)
