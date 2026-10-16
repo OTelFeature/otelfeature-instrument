@@ -418,6 +418,51 @@ a benchmark; reproduce with `uv run python benchmarks/span_cost.py`):
 Targeting costs one in-process flag evaluation per span, so it belongs on a
 flag while it is being used, not left on permanently.
 
+### Muting an instrumentation, once per tracer
+
+"The jdbc/httpx instrumentation is flooding us, mute it now" is a targeting
+rule on the instrumentation scope:
+
+```json
+"telemetryLevel": {
+  "state": "ENABLED", "defaultVariant": "full",
+  "variants": { "full": "FULL", "off": "OFF" },
+  "targeting": { "if": [
+    { "==": [ { "var": "otel.scope.name" }, "opentelemetry.instrumentation.httpx" ] }, "off", "full"
+  ] }
+}
+```
+
+A rule that reads **only resource and scope keys** (`service.*`,
+`deployment.environment.name`, `telemetry.sdk.language`,
+`otel.scope.name`, `otel.scope.version`) has the same answer for every span
+of a tracer, so it is evaluated **once per tracer**, not per span, and kept
+until the next provider event (a ruleset change re-decides every tracer). A
+muted instrumentation then costs nothing per span: its spans are never
+created. The same holds for `traceSampleRatio` by `service.name`.
+
+To tell, the extension reads the rule itself from flagd's in-process
+evaluator and lists the keys it can read. Anything else - a span-level key
+(`span.kind`, `url.path`, ...), `targetingKey` (including `fractional`
+without an explicit bucketing key), `otelfeature.*`, `$flagd.timestamp`, a
+computed `var` path, or a provider other than flagd in-process/file -
+keeps per-span evaluation, exactly as before.
+
+This is scope filtering, not `OTEL_INSTRUMENTATION_*_ENABLED`: the
+instrumentation is still installed and still runs its hooks; only its spans
+are never started.
+
+**Finding the scope name.** It is the instrumentation package's module,
+e.g. `opentelemetry.instrumentation.fastapi` for FastAPI server spans. Any
+exported span shows it as its instrumentation scope (`otel.scope.name` /
+"library name" in most backends). Or run once with DEBUG logging for
+`otelfeature_instrument`, which logs every scope a tracer is created for:
+
+```python
+logging.getLogger("otelfeature_instrument").setLevel(logging.DEBUG)
+# otelfeature-instrument: tracer for otel.scope.name='opentelemetry.instrumentation.fastapi' ...
+```
+
 ### Error rate in the context
 
 `otelfeature.http.server.error_rate` (a number, 0.0-1.0) is the service's

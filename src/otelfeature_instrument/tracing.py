@@ -15,6 +15,7 @@ evaluation_context.py.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import logging
 from logging import getLogger
 from typing import Any, Iterator, Mapping
 
@@ -33,8 +34,15 @@ from otelfeature_instrument.evaluation_context import (
     PresetTraceIdGenerator,
     resource_attributes,
     span_context,
+    tracer_context,
 )
-from otelfeature_instrument.flags import TelemetryPolicy, cached_policy, current_policy
+from otelfeature_instrument.flags import (
+    TelemetryPolicy,
+    cached_policy,
+    current_policy,
+    policy_generation,
+    tracer_policy,
+)
 from otelfeature_instrument.sampling import flag_aware_sampler, handover
 
 
@@ -70,6 +78,32 @@ class _VerbosityAwareTracer(Tracer):
         self._scope_version = scope_version
         self._resource = resource or {}
         self._ids = ids
+        # (generation, policy for roots, policy for children); a policy of
+        # `None` means "this tracer has to evaluate per span".
+        self._per_tracer: tuple[int, TelemetryPolicy | None, TelemetryPolicy | None] = (
+            -1,
+            None,
+            None,
+        )
+
+    def _tracer_policy(self, root: bool) -> TelemetryPolicy | None:
+        """Decided once per tracer, for rules that read only resource and scope
+        keys; recomputed after every provider event."""
+        generation = policy_generation()
+        per_tracer = self._per_tracer
+        if per_tracer[0] != generation:
+            context = tracer_context(
+                base=self._resource, scope_name=self._scope_name, scope_version=self._scope_version
+            )
+            # Read the generation before evaluating: an event landing in
+            # between leaves this tagged stale, and the next span redoes it.
+            per_tracer = (
+                generation,
+                tracer_policy(context, root=True),
+                tracer_policy(context, root=False),
+            )
+            self._per_tracer = per_tracer
+        return per_tracer[1] if root else per_tracer[2]
 
     @staticmethod
     def _decide(policy: TelemetryPolicy, kind: SpanKind) -> int:
@@ -189,6 +223,21 @@ class _VerbosityAwareTracer(Tracer):
                     return self._drop(context, None, kind=kind)
                 return self._wrapped.start_span(*args)
 
+        policy = self._tracer_policy(root=not parent.is_valid)
+        if policy is not None:
+            # Decided for the whole tracer: no span context, no trace-id
+            # handover - nothing in it depends on the trace.
+            decision = self._decide(policy, kind)
+            if decision == _STAND_IN:
+                return None
+            if decision == _DROP_TRACE:
+                return self._drop(context, None, kind=kind)
+            handover(policy)
+            try:
+                return self._wrapped.start_span(*args)
+            finally:
+                handover(None)
+
         policy, root_id = self._evaluate(parent, name, kind, attributes)
         decision = self._decide(policy, kind)
         if decision == _STAND_IN:
@@ -305,6 +354,14 @@ class _VerbosityAwareTracerProvider(TracerProvider):
         schema_url: str | None = None,
         attributes: otel_types.Attributes | None = None,
     ) -> Tracer:
+        if _logger.isEnabledFor(logging.DEBUG):
+            # How to find the `otel.scope.name` to target: run once with
+            # DEBUG logging for otelfeature_instrument.
+            _logger.debug(
+                "otelfeature-instrument: tracer for otel.scope.name=%r (version %r)",
+                instrumenting_module_name,
+                instrumenting_library_version,
+            )
         real_tracer = self._wrapped.get_tracer(
             instrumenting_module_name,
             instrumenting_library_version,

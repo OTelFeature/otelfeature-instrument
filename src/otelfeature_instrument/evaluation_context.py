@@ -148,6 +148,20 @@ def span_context(
     )
 
 
+def tracer_context(
+    *, base: Mapping[str, Any], scope_name: str, scope_version: str | None
+) -> EvaluationContext:
+    """What every span of one tracer has in common: resource and scope keys.
+
+    No live keys - they change over time - and no `targetingKey`.
+    """
+    flat: dict[str, Any] = dict(base)
+    flat["otel.scope.name"] = scope_name
+    if scope_version:
+        flat["otel.scope.version"] = scope_version
+    return EvaluationContext(attributes=nest(flat))
+
+
 def _overlaps(a: str, b: str) -> bool:
     return a == b or a.startswith(b + ".") or b.startswith(a + ".")
 
