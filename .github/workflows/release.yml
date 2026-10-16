@@ -1,6 +1,6 @@
 # Release: pushing a `v*` tag builds the wheel and sdist in the toolchain image
 # (ci/Dockerfile) and publishes them as a GitHub Release (spec C-006).
-# `vX.Y.Z-rc.N` tags become pre-releases. PyPI publishing is out of scope.
+# `v<version>-rc.N` tags become pre-releases. PyPI publishing is out of scope.
 name: Release
 
 on:
@@ -8,7 +8,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write # create the release and upload its assets
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -17,6 +17,8 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its assets
     steps:
       - uses: actions/checkout@v7
 
@@ -32,8 +34,8 @@ jobs:
           cache-from: type=gha,scope=ci-image
           cache-to: type=gha,mode=max,scope=ci-image
 
-      # vX.Y.Z or vX.Y.Z-rc.N, equal to pyproject.toml and __version__;
-      # also decides whether this is a pre-release.
+      # v<version> or v<version>-rc.N, <version> being pyproject.toml's
+      # version (and __version__); -rc.N makes it a pre-release.
       - name: Check the tag matches the package version
         id: version
         run: |
