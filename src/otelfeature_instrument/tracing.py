@@ -186,7 +186,7 @@ class _VerbosityAwareTracer(Tracer):
                 if decision == _STAND_IN:
                     return None
                 if decision == _DROP_TRACE:
-                    return self._drop(context, None)
+                    return self._drop(context, None, kind=kind)
                 return self._wrapped.start_span(*args)
 
         policy, root_id = self._evaluate(parent, name, kind, attributes)
