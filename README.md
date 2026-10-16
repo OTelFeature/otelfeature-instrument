@@ -577,6 +577,40 @@ builds the same image with GitHub Actions layer caching and runs the same
   `src/`), so the `otelfeature-instrument` console script isn't available in
   `make shell`.
 
+## Releases
+
+Releases are [GitHub Releases](https://github.com/OTelFeature/otelfeature-instrument/releases)
+with the wheel and sdist attached; there is no PyPI package yet. A
+maintainer cuts one by pushing tags after the version bump is merged -
+an rc first, to rehearse the workflow:
+
+```sh
+git tag v0.3.0-rc.1 && git push origin v0.3.0-rc.1   # pre-release
+# check the pre-release and its two assets, then:
+git tag v0.3.0 && git push origin v0.3.0
+```
+
+An rc tag is always `v<pyproject version>-rc.N` - the same `0.3.0` as the
+release it precedes, so its artifacts are versioned `0.3.0` too. After the
+final release, check its generated notes: GitHub may compute them against
+the rc rather than the previous release.
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) then, in
+the toolchain image: checks the tag - exactly `v<version>`, or
+`v<version>-rc.N` for a pre-release - against `version` in `pyproject.toml`
+and `__version__` (and fails otherwise), runs the tests, builds with
+`uv build`, and creates the release with generated notes (a re-run
+re-uploads the assets). An rc is also the way to try unreleased code on the
+demo stage. Locally: `make dist` builds both artifacts into `dist/`,
+`make check-version TAG=v0.3.0` runs the tag check.
+
+To depend on a release, pin the git tag, e.g. with uv:
+
+```toml
+[tool.uv.sources]
+otelfeature-instrument = { git = "https://github.com/OTelFeature/otelfeature-instrument", tag = "v0.3.0" }
+```
+
 ## Known limitations
 
 ### `OFF` leaves gaps in traces
