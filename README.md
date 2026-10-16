@@ -339,6 +339,7 @@ against the same names as the telemetry itself:
 | Instrumentation scope          | `otel.scope.name`, `otel.scope.version` |
 | Span at start                  | `span.kind` (lower-case: `server`, `client`, `internal`, `producer`, `consumer`), `span.name`, plus every attribute the span is started with - typically `url.path`, `http.request.method`, `server.address`, `db.system.name`, `db.operation.name`, `rpc.service` |
 | `targetingKey`                 | the **trace id** (32 hex digits), so `fractional` buckets a whole trace the same way in every service |
+| Live, per process              | `otelfeature.http.server.error_rate` - see [Error rate](#error-rate-in-the-context) |
 
 ```json
 "targeting": {
@@ -391,6 +392,48 @@ a benchmark; reproduce with `uv run python benchmarks/span_cost.py`):
 Targeting costs one in-process flag evaluation per span, so it belongs on a
 flag while it is being used, not left on permanently.
 
+### Error rate in the context
+
+`otelfeature.http.server.error_rate` (a number, 0.0-1.0) is the service's
+HTTP server error rate over the last collection interval, so a flagd rule
+can close the loop on its own - no outside script, no new metric:
+
+```json
+"traceSampleRatio": {
+  "state": "ENABLED", "defaultVariant": "low",
+  "variants": { "low": 0.1, "all": 1.0 },
+  "targeting": { "if": [
+    { ">": [ { "var": "otelfeature.http.server.error_rate" }, 0.05 ] }, "all", "low"
+  ] }
+}
+```
+
+- **Input:** the `http.server.request.duration` histogram the HTTP server
+  instrumentation already records - not spans, because a sampled-out span
+  never records a status, while metrics are recorded whatever the sampling
+  does. Turning sampling down does not blind the loop.
+- **How:** an extra in-process reader with *delta* temporality sits next to
+  the OTLP reader and is collected every `OTELFEATURE_ERROR_RATE_INTERVAL`
+  seconds (default `10`). Each collection is its own window:
+  `requests with error.type / all requests`. No smoothing. The OTLP reader,
+  its temporality and what it exports are unchanged.
+- **No requests in the interval:** the key is left out of the context (a
+  rule comparing it then sees `null`, which is not `> 0.05`).
+- **Per service:** each process measures and publishes its own rate, so a
+  rule raises sampling for the service whose errors went up.
+- **Lags by one interval:** the rate a rule sees describes the *previous*
+  interval.
+
+> **Set `OTEL_SEMCONV_STABILITY_OPT_IN=http`.** The Python HTTP
+> instrumentations only emit `http.server.request.duration` (with
+> `error.type`) with the stable HTTP semantic conventions opted in.
+> Without it they emit the older `http.server.duration`, which has no
+> `error.type`; the rate then falls back to counting
+> `http.status_code >= 500`, which misses errors that never produced a
+> response. With `http/dup` both metrics are emitted; only the stable one
+> is counted. `otelfeature-instrument` does not set the opt-in itself,
+> because it also renames the metrics and attributes your dashboards see.
+
 ## Configuration
 
 | Environment variable         | Default    | Description                                                    |
@@ -402,6 +445,8 @@ flag while it is being used, not left on permanently.
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | flagd key of the selective-drop flag |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
+| `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections (see [Error rate](#error-rate-in-the-context)) |
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | -       | Set to `http` so the HTTP instrumentation emits `http.server.request.duration` with `error.type` |
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback ratio for `traceSampleRatio`; `always_off` / `parentbased_always_off` are hard floors no flag overrides; the sampler is parent-based and custom samplers are not loaded |
 
 The `telemetryLevel` (variants `FULL`/`IO`/`OFF`) and `otelEnabled` (boolean)
