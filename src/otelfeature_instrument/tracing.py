@@ -81,21 +81,36 @@ class _VerbosityAwareTracer(Tracer):
             return _STAND_IN
         return _KEEP
 
-    def _drop(self, context: Context | None, trace_id: int | None) -> Span | None:
-        """`recordSpan=false`. A child is suppressed like an `IO` span (`None`:
-        its children attach to the real parent). A root drops its whole trace:
-        it gets a valid but *non-sampled* context, so its children are not
+    def _drop(
+        self, context: Context | None, trace_id: int | None, *, kind: SpanKind
+    ) -> Span | None:
+        """`recordSpan=false`. A span with a local parent is suppressed like an
+        `IO` span (`None`: its children attach to the real parent).
+
+        A root - no valid parent, or an incoming request (SERVER/CONSUMER)
+        whose parent is remote - drops the whole request in this service: it
+        gets a valid but *non-sampled* context, so its children are not
         sampled either - instead of each starting a trace of its own - and
-        outgoing calls propagate `sampled=0`."""
-        if trace.get_current_span(context).get_span_context().is_valid:
+        outgoing calls propagate `sampled=0`. Behind a proxy that traces its
+        health checks, the trace therefore ends at the caller. Internal and
+        client spans with a remote parent stay suppressed as children.
+        """
+        parent = trace.get_current_span(context).get_span_context()
+        incoming = parent.is_remote and kind in (SpanKind.SERVER, SpanKind.CONSUMER)
+        if parent.is_valid and not incoming:
             return None
         ids = self._ids or _random_ids
+        if parent.is_valid:
+            trace_id = parent.trace_id  # stay in the caller's trace, unsampled
+        elif trace_id is None:
+            trace_id = ids.generate_trace_id()
         return trace.NonRecordingSpan(
             trace.SpanContext(
-                trace_id=trace_id if trace_id is not None else ids.generate_trace_id(),
+                trace_id=trace_id,
                 span_id=ids.generate_span_id(),
                 is_remote=False,
                 trace_flags=trace.TraceFlags(trace.TraceFlags.DEFAULT),
+                trace_state=parent.trace_state if parent.is_valid else None,
             )
         )
 
@@ -157,7 +172,7 @@ class _VerbosityAwareTracer(Tracer):
             if decision == _STAND_IN:
                 return None
             if decision == _DROP_TRACE:
-                return self._drop(context, None)
+                return self._drop(context, None, kind=kind)
             return self._wrapped.start_span(*args)
 
         policy, root_id = self._evaluate(name, context, kind, attributes)
@@ -166,7 +181,7 @@ class _VerbosityAwareTracer(Tracer):
             return None
         if decision == _DROP_TRACE:
             # A dropped root keeps the trace id it was evaluated on.
-            return self._drop(context, root_id)
+            return self._drop(context, root_id, kind=kind)
         if root_id is None:
             return self._wrapped.start_span(*args)
         # Set only around the one call that consumes it: anything that started

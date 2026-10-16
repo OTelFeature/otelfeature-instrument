@@ -244,8 +244,16 @@ boolean flag `recordSpan` (default `true`), evaluated against the
   non-parent-based sampler (`OTEL_TRACES_SAMPLER=always_on` or
   `traceidratio`) would sample the children anyway, parented to a span that
   was never exported.
-- **A span with a remote parent** (an incoming `traceparent`) counts as a
-  non-root: it is suppressed, and its children attach to the remote parent.
+- **An incoming request counts as a root**, even with a remote parent: a
+  `SERVER` or `CONSUMER` span whose `traceparent` came from another service
+  drops the whole request here, exactly like a root - it gets a non-sampled
+  context in the *caller's* trace, so nothing below it is recorded and
+  outgoing calls carry `sampled=0`. A health check sent by a proxy or
+  gateway that traces its probes therefore leaves no spans in this service.
+  The trade-off: the trace ends at the caller - downstream services see
+  `sampled=0` and record nothing for it either. `INTERNAL` and `CLIENT`
+  spans with a remote parent are suppressed as children; their children
+  attach to the remote parent.
 - **Precedence:** `OTEL_SDK_DISABLED` (hard floor) > `otelEnabled` /
   `telemetryLevel=OFF` > `recordSpan`. `recordSpan=true` never re-enables
   anything the global switches turned off.

@@ -259,28 +259,68 @@ def test_a_static_record_span_false_drops_every_trace_unsampled(flagd):
     assert exporter.get_finished_spans() == ()
 
 
-def test_a_span_with_a_remote_parent_is_suppressed_as_a_non_root(flagd):
-    """Documented behaviour: a remote parent makes the span a non-root, so
-    its children attach to that parent (and follow its sampling)."""
-    flagd({RECORD_SPAN_FLAG_KEY: HEALTH_CHECKS})
-    exporter = InMemorySpanExporter()
-    tracer = _tracer(exporter)
-    remote = trace.set_span_in_context(
+def _remote(sampled: bool = True):
+    return trace.set_span_in_context(
         trace.NonRecordingSpan(
             trace.SpanContext(
-                trace_id=0xABC, span_id=0xDEF, is_remote=True,
-                trace_flags=trace.TraceFlags(trace.TraceFlags.SAMPLED),
+                trace_id=0xABC,
+                span_id=0xDEF,
+                is_remote=True,
+                trace_flags=trace.TraceFlags(
+                    trace.TraceFlags.SAMPLED if sampled else trace.TraceFlags.DEFAULT
+                ),
+                trace_state=trace.TraceState([("vendor", "x")]),
             )
         )
     )
 
-    with tracer.start_as_current_span(
-        "GET /health", context=remote, kind=trace.SpanKind.SERVER, attributes={"url.path": "/health"}
-    ):
-        tracer.start_span("handler").end()
 
-    (handler,) = exporter.get_finished_spans()
-    assert handler.parent.span_id == 0xDEF
+@pytest.mark.parametrize("kind", [trace.SpanKind.SERVER, trace.SpanKind.CONSUMER])
+def test_a_proxied_health_check_leaves_no_spans_at_all(flagd, kind):
+    """A proxy that traces its probes sends a sampled traceparent: the request
+    still counts as a root here, and the whole request is dropped."""
+    flagd({RECORD_SPAN_FLAG_KEY: HEALTH_CHECKS})
+    exporter = InMemorySpanExporter()
+    tracer = _tracer(exporter)
+
+    with tracer.start_as_current_span(
+        "GET /health", context=_remote(), kind=kind, attributes={"url.path": "/health"}
+    ) as dropped:
+        with tracer.start_as_current_span("handler"):
+            tracer.start_span("SELECT 1", kind=trace.SpanKind.CLIENT).end()
+        headers: dict[str, str] = {}
+        inject(headers)
+
+    assert exporter.get_finished_spans() == ()
+    # The caller's trace, unsampled from here on - the trace ends at the caller.
+    context = dropped.get_span_context()
+    assert context.trace_id == 0xABC and context.span_id != 0xDEF
+    assert not context.trace_flags.sampled
+    assert headers["traceparent"] == f"00-{0xABC:032x}-{context.span_id:016x}-00"
+    assert headers["tracestate"] == "vendor=x"
+
+
+@pytest.mark.parametrize("kind", [trace.SpanKind.INTERNAL, trace.SpanKind.CLIENT])
+def test_internal_and_client_spans_with_a_remote_parent_stay_children(flagd, kind):
+    flagd(
+        {
+            RECORD_SPAN_FLAG_KEY: {
+                "state": "ENABLED",
+                "defaultVariant": "on",
+                "variants": {"on": True, "off": False},
+                "targeting": {"if": [{"==": [{"var": "span.name"}, "dropped"]}, "off", None]},
+            }
+        }
+    )
+    exporter = InMemorySpanExporter()
+    tracer = _tracer(exporter)
+
+    with tracer.start_as_current_span("dropped", context=_remote(), kind=kind) as stand_in:
+        tracer.start_span("kept").end()
+
+    assert stand_in.get_span_context().span_id == 0xDEF
+    (kept,) = exporter.get_finished_spans()
+    assert kept.parent.span_id == 0xDEF
 
 
 def test_a_provider_error_records(flagd, monkeypatch):
