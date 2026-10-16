@@ -9,7 +9,14 @@ from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from otelfeature_instrument.flags import _PolicySource
 from otelfeature_instrument.tracing import _VerbosityAwareTracerProvider
+
+
+def _flags(*, enabled=True, level="FULL"):
+    """Serve the policy these flag values combine into, as the real source would."""
+    policy = _PolicySource()._combine(enabled, level)
+    return patch("otelfeature_instrument.tracing.current_policy", return_value=policy)
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +38,7 @@ def test_full_keeps_internal_spans():
     exporter = InMemorySpanExporter()
     tracer = _wrapped_tracer(exporter)
 
-    with patch("otelfeature_instrument.tracing.current_verbosity", return_value="FULL"):
+    with _flags(level="FULL"):
         with tracer.start_as_current_span("outer", kind=trace.SpanKind.INTERNAL):
             with tracer.start_as_current_span("inner", kind=trace.SpanKind.CLIENT):
                 pass
@@ -45,7 +52,7 @@ def test_io_suppresses_internal_spans_without_orphaning_children():
     exporter = InMemorySpanExporter()
     tracer = _wrapped_tracer(exporter)
 
-    with patch("otelfeature_instrument.tracing.current_verbosity", return_value="IO"):
+    with _flags(level="IO"):
         with tracer.start_as_current_span("outer", kind=trace.SpanKind.INTERNAL):
             with tracer.start_as_current_span("inner", kind=trace.SpanKind.CLIENT):
                 pass
@@ -59,7 +66,7 @@ def test_io_only_suppresses_internal_kind():
     exporter = InMemorySpanExporter()
     tracer = _wrapped_tracer(exporter)
 
-    with patch("otelfeature_instrument.tracing.current_verbosity", return_value="IO"):
+    with _flags(level="IO"):
         with tracer.start_as_current_span("client-span", kind=trace.SpanKind.CLIENT):
             pass
 
@@ -80,7 +87,7 @@ def test_off_suppresses_every_span_kind():
     exporter = InMemorySpanExporter()
     tracer = _wrapped_tracer(exporter)
 
-    with patch("otelfeature_instrument.tracing.current_verbosity", return_value="OFF"):
+    with _flags(level="OFF"):
         _all_kinds(tracer)
 
     assert exporter.get_finished_spans() == ()
@@ -90,9 +97,7 @@ def test_otel_enabled_false_suppresses_every_span_kind_regardless_of_level():
     exporter = InMemorySpanExporter()
     tracer = _wrapped_tracer(exporter)
 
-    with patch("otelfeature_instrument.tracing.telemetry_enabled", return_value=False), patch(
-        "otelfeature_instrument.tracing.current_verbosity", return_value="FULL"
-    ):
+    with _flags(enabled=False, level="FULL"):
         _all_kinds(tracer)
 
     assert exporter.get_finished_spans() == ()
@@ -116,9 +121,7 @@ def test_off_keeps_the_incoming_parent_context(enabled, level):
     )
     context = trace.set_span_in_context(remote_parent)
 
-    with patch("otelfeature_instrument.tracing.telemetry_enabled", return_value=enabled), patch(
-        "otelfeature_instrument.tracing.current_verbosity", return_value=level
-    ):
+    with _flags(enabled=enabled, level=level):
         with tracer.start_as_current_span(
             "server", context=context, kind=trace.SpanKind.SERVER
         ) as span:
@@ -143,7 +146,7 @@ def test_flipping_back_on_resumes_tracing():
     exporter = InMemorySpanExporter()
     tracer = _wrapped_tracer(exporter)
 
-    with patch("otelfeature_instrument.tracing.telemetry_enabled", return_value=False):
+    with _flags(enabled=False):
         _all_kinds(tracer)
     assert exporter.get_finished_spans() == ()
 
@@ -162,7 +165,7 @@ def test_unknown_level_fails_open_to_full(level):
     exporter = InMemorySpanExporter()
     tracer = _wrapped_tracer(exporter)
 
-    with patch("otelfeature_instrument.tracing.current_verbosity", return_value=level):
+    with _flags(level=level):
         _all_kinds(tracer)
 
     assert len(exporter.get_finished_spans()) == 5
@@ -175,7 +178,7 @@ def test_suppressed_span_does_not_write_to_a_recording_parent():
     tracer = _wrapped_tracer(exporter)
 
     with tracer.start_as_current_span("server", kind=trace.SpanKind.SERVER):
-        with patch("otelfeature_instrument.tracing.current_verbosity", return_value="OFF"):
+        with _flags(level="OFF"):
             child = tracer.start_span("client", kind=trace.SpanKind.CLIENT)
             child.set_attribute("http.response.status_code", 404)
             child.set_status(trace.Status(trace.StatusCode.ERROR))
@@ -197,7 +200,7 @@ def test_suppressed_span_restores_context_when_the_body_raises():
     )
     before = trace.get_current_span()
 
-    with patch("otelfeature_instrument.tracing.current_verbosity", return_value="OFF"):
+    with _flags(level="OFF"):
         with pytest.raises(RuntimeError):
             with tracer.start_as_current_span(
                 "server", context=trace.set_span_in_context(remote_parent)
@@ -205,3 +208,37 @@ def test_suppressed_span_restores_context_when_the_body_raises():
                 raise RuntimeError("boom")
 
     assert trace.get_current_span() is before
+
+
+
+@pytest.mark.parametrize(
+    "enabled, level, exported",
+    [
+        (True, "FULL", {"server", "internal", "client", "producer", "consumer"}),
+        (True, "IO", {"server", "client", "producer", "consumer"}),
+        (True, "OFF", set()),
+        (False, "FULL", set()),
+    ],
+)
+def test_real_policy_source_drives_the_tracer(monkeypatch, enabled, level, exported):
+    """No patched policy: flag values go through the real `current_policy()`."""
+    from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
+
+    from otelfeature_instrument import flags
+
+    values = {"otelEnabled": enabled, "telemetryLevel": level}
+
+    class _Client:
+        def _get(self, key, default_value, context=None):
+            return FlagEvaluationDetails(flag_key=key, value=values[key], reason=Reason.STATIC)
+
+        get_string_details = get_boolean_details = _get
+
+    monkeypatch.setattr(flags, "_policy_source", _PolicySource())
+    monkeypatch.setattr(feature_api, "get_client", lambda: _Client())
+    flags._policy_source.classify()
+    exporter = InMemorySpanExporter()
+
+    _all_kinds(_wrapped_tracer(exporter))
+
+    assert {span.name for span in exporter.get_finished_spans()} == exported
