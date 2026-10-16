@@ -98,9 +98,26 @@ def test_install_tracer_provider_wires_the_flag_sampler(monkeypatch):
 
 @pytest.mark.parametrize(
     "value, expected",
-    [(0.25, 0.25), (1, 1.0), (0, 0.0), (2.5, 1.0), (-0.1, 0.0), (math.nan, 0.5), (True, 0.5), ("x", 0.5)],
+    [
+        (0.25, 0.25),
+        (1, 1.0),
+        (0, 0.0),
+        (-0.0, 0.0),
+        # above 1.0: clamped (UC-004 A1)
+        (2.5, 1.0),
+        (1.0000001, 1.0),
+        # invalid: the startup ratio (NFR-001) - a negative is a typo, not "drop all"
+        (-0.1, 0.5),
+        (-1, 0.5),
+        (-math.inf, 0.5),
+        (math.inf, 0.5),
+        (math.nan, 0.5),
+        (True, 0.5),
+        ("x", 0.5),
+        (None, 0.5),
+    ],
 )
-def test_out_of_range_clamps_and_non_numbers_fall_back(value, expected):
+def test_above_one_clamps_and_invalid_values_fall_back(value, expected):
     resolver = _SampleRatioResolver(default=0.5)
 
     class _Client:
@@ -111,7 +128,7 @@ def test_out_of_range_clamps_and_non_numbers_fall_back(value, expected):
         assert resolver.current() == expected
 
 
-@pytest.mark.parametrize("bad", [3.0, math.nan])
+@pytest.mark.parametrize("bad", [3.0, -0.5, math.inf, math.nan])
 def test_a_bad_value_is_logged_once(caplog, bad):
     resolver = _SampleRatioResolver()
 
@@ -290,6 +307,11 @@ def test_real_flagd_targets_the_ratio_by_service(flagd):
 def test_real_flagd_out_of_range_and_wrong_type_never_raise(flagd):
     flagd({"defaultVariant": "big", "variants": {"big": 2.5}})
     assert flags._policy_source.cached.sample_ratio == 1.0
+
+    # A negative ratio falls back to the startup ratio instead of dropping
+    # every trace (NFR-001, UC-004 A1).
+    flagd({"defaultVariant": "typo", "variants": {"typo": -0.1}}, startup_ratio=0.25)
+    assert flags._policy_source.cached.sample_ratio == 0.25
 
     flagd({"defaultVariant": "text", "variants": {"text": "lots"}}, startup_ratio=0.25)
     # A type mismatch: the SDK serves the startup value instead.

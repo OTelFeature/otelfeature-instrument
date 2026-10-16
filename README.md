@@ -158,7 +158,7 @@ Enforcement points never read a flag directly. `current_policy()` in
 | `enabled`           | `otelEnabled` and `telemetryLevel != OFF`      | `OTEL_SDK_DISABLED` is not `true` (a hard floor) |
 | `suppress_internal` | `telemetryLevel == IO`                        | `false`                           |
 | `record_span`       | `recordSpan` (only while `enabled`)           | `true`                            |
-| `sample_ratio`      | `traceSampleRatio`, clamped to 0.0-1.0        | `OTEL_TRACES_SAMPLER` / `_ARG`, as the SDK reads them (`1.0` by default) |
+| `sample_ratio`      | `traceSampleRatio`; above 1.0 clamped to 1.0  | `OTEL_TRACES_SAMPLER` / `_ARG`, as the SDK reads them (`1.0` by default) |
 
 **Every field falls back to its startup value**, resolved from the
 environment once when the process starts. With flagd unreachable or a flag
@@ -286,8 +286,10 @@ to 100% for this service for ten minutes" needs it live, so
   `fractional` rule on `targetingKey` (the trace id), which every flagd
   evaluator computes identically, and serve `0.0`/`1.0` per bucket.
 - **`0.0` is `always_off`**, `1.0` is `always_on` - no separate flag needed.
-- **Never throws on the hot path.** Out of range is clamped; a non-numeric
-  or NaN value falls back to the startup value (logged once).
+- **Never throws on the hot path.** A value above 1.0 is clamped to 1.0. A
+  negative value, NaN, infinity or a non-number falls back to the startup
+  ratio, logged once - a negative ratio is far more likely a typo than "drop
+  every trace" (spec: NFR-001, UC-004 A1).
 - **Startup fallback** is the ratio `OTEL_TRACES_SAMPLER`/`_ARG` amount to,
   parsed as the SDK parses them (`traceidratio` its argument, anything else
   `1.0`). The sampler itself is parent-based: with a non-parent-based
