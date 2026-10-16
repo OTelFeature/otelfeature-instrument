@@ -265,6 +265,21 @@ def test_interval_from_environment(raw, expected):
     assert interval_from_environment(environ) == expected
 
 
+def test_install_meter_provider_wires_the_minimum_from_the_environment(monkeypatch):
+    built = []
+    monkeypatch.setenv(error_rate.MIN_REQUESTS_ENV_VAR, "3")
+    monkeypatch.setattr(metrics, "MeterProvider", lambda **kwargs: built.append(kwargs))
+    monkeypatch.setattr(metrics.metrics, "set_meter_provider", lambda provider: None)
+    started = []
+    monkeypatch.setattr(ErrorRatePublisher, "start", lambda self: started.append(self))
+
+    metrics.install_meter_provider(Resource.create())
+
+    (publisher,) = started
+    assert publisher._min_requests == 3
+    built[0]["metric_readers"][0].shutdown()
+
+
 def test_install_meter_provider_adds_the_reader_next_to_otlp(monkeypatch):
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 
@@ -340,7 +355,6 @@ def test_real_flagd_rule_raises_sampling_when_the_error_rate_crosses_a_threshold
         assert window(0) == 0  # healthy again
     finally:
         feature_api.clear_providers()
-
 
 
 def test_below_the_minimum_request_count_no_rate_is_published():

@@ -11,9 +11,9 @@ Every `OTELFEATURE_ERROR_RATE_INTERVAL` seconds:
 
     error_rate = requests with error.type / all requests
 
-published as `otelfeature.http.server.error_rate` - absent while fewer than
-`OTELFEATURE_ERROR_RATE_MIN_REQUESTS` (default 10) requests were seen, so one
-failure in one request can't publish 1.0. See "Error rate" in the README for the opt-in it relies on.
+published as `otelfeature.http.server.error_rate` - absent while fewer
+than `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` (default 10) requests were seen,
+so one failure in one request can't publish 1.0. See "Error rate" in the README for the opt-in it relies on.
 """
 
 from __future__ import annotations
@@ -66,7 +66,9 @@ def is_error(attributes: Mapping[str, Any]) -> bool:
     return False
 
 
-def error_rate(data: MetricsData | None, min_requests: int = 1) -> float | None:
+def error_rate(
+    data: MetricsData | None, min_requests: int = DEFAULT_MIN_REQUESTS
+) -> float | None:
     """Σcount(error points) / Σcount(all points) over the HTTP server duration
     histogram; `None` when fewer than `min_requests` requests were seen.
 

@@ -421,7 +421,10 @@ can close the loop on its own - no outside script, no new metric:
   `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` (default `10`) the key is left out
   of the context - a rule comparing it then sees `null`, which is not
   `> 0.05`. One failure in one request can't publish `1.0` and flip the
-  loop.
+  loop. The flip side: a service seeing fewer requests than that per
+  interval (under 1 req/s at the defaults) never gets a rate, even in a
+  total outage - lower the minimum or lengthen the interval for quiet
+  services.
 - **Per service:** each process measures and publishes its own rate, so a
   rule raises sampling for the service whose errors went up.
 - **Lags:** the rate a rule sees describes the *previous* interval, so it
