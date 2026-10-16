@@ -15,7 +15,7 @@ from otelfeature_instrument.tracing import _VerbosityAwareTracerProvider
 
 def _flags(*, enabled=True, level="FULL"):
     """Serve the policy these flag values combine into, as the real source would."""
-    policy = _PolicySource()._combine(enabled, level, (1.0, False))
+    policy = _PolicySource()._combine(enabled, level, 1.0)
     return patch("otelfeature_instrument.tracing.current_policy", return_value=policy)
 
 

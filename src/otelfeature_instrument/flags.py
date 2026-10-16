@@ -30,10 +30,8 @@ import math
 import os
 import threading
 from dataclasses import dataclass
-from functools import cached_property
 from logging import getLogger
-from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Mapping
 
 from openfeature import api as feature_api
 from openfeature.contrib.provider.flagd import FlagdProvider
@@ -105,22 +103,6 @@ class TelemetryPolicy:
     record_span: bool = True
     # Probability that a new trace is sampled. From `traceSampleRatio`.
     sample_ratio: float = 1.0
-    # Whether `sample_ratio` is a non-default decision: the flag was read and
-    # set a ratio other than the startup value. Only then is it recorded on
-    # spans.
-    sample_ratio_decided: bool = False
-
-    @cached_property
-    def decision_attributes(self) -> Mapping[str, Any] | None:
-        """Attributes recorded on a kept root span, so a backend can re-weight
-        counts by the applied ratio. Which flag evaluated to what is not
-        recorded here - that is the OpenFeature OpenTelemetry hook's job (see
-        `enable_tracing_hook`). Built once per policy object, so a cached
-        policy never builds them again; read-only, since every root on the
-        static path shares them."""
-        if not self.sample_ratio_decided:
-            return None
-        return MappingProxyType({"otelfeature.sample_ratio": self.sample_ratio})
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] = os.environ) -> TelemetryPolicy:
@@ -174,11 +156,13 @@ def enable_tracing_hook(environ: Mapping[str, str] = os.environ) -> bool:
     """Attach the OpenFeature OpenTelemetry `TracingHook` to the extension's
     own evaluations, if OTELFEATURE_OPENFEATURE_TRACING_HOOK=true.
 
-    Off by default, on purpose: with targeted flags the extension evaluates
-    per span, so the hook adds a `feature_flag.evaluation` event per span -
-    exactly the kind of noise this project exists to remove. Recording the
-    application's own flag evaluations is the application's business (it
-    registers the hook itself); this only covers the extension's.
+    Recording which flag evaluated to what is the hook's job, not the
+    extension's: it never writes `feature_flag.*` itself. Off by default, on
+    purpose: with targeted flags the extension evaluates per span, so the
+    hook adds a `feature_flag.evaluation` event per span - exactly the kind
+    of noise this project exists to remove. Recording the application's own
+    flag evaluations is the application's business (it registers the hook
+    itself); this only covers the extension's.
 
     The hook writes to the span that is current during the evaluation: the
     *parent* of the span being decided. Evaluations for a new root (no
@@ -291,11 +275,7 @@ class _CachingResolver:
         # provider later is picked up without restarting anything.
         details = self._read(feature_api.get_client(), context)
         self._report(details)
-        return self._answer(details), details
-
-    def _answer(self, details: FlagEvaluationDetails):
-        """What is cached and served for this flag."""
-        return self._normalise(details.value)
+        return self._normalise(details.value), details
 
     def _report(self, details: FlagEvaluationDetails) -> None:
         error = details.error_code
@@ -382,12 +362,6 @@ class _SampleRatioResolver(_CachingResolver):
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
         return client.get_float_details(self.flag_key, self.default, context, *_hook_options)
 
-    def _answer(self, details: FlagEvaluationDetails) -> tuple[float, bool]:
-        # `(ratio, read)`: whether the flag was actually read travels with the
-        # ratio, so a kept root records a decision the flag made - and never
-        # one the startup fallback made.
-        return self._normalise(details.value), details.error_code is None
-
     def _normalise(self, value) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
             self._warn_once(value, "is not a number - using the startup value")
@@ -440,7 +414,6 @@ class _PolicySource:
         )
         self.record = _RecordSpanResolver(self.defaults.record_span)
         self.ratio = _SampleRatioResolver(self.defaults.sample_ratio)
-        self._default_ratio = (self.defaults.sample_ratio, False)
         # Same contract as `_CachingResolver._cached`: set only while every
         # input flag is cached, so the static path stays one attribute read
         # and allocates nothing.
@@ -491,7 +464,9 @@ class _PolicySource:
             if enabled is None or level is None or record is None:
                 self._cached = self._cached_child = None
                 return
-            self._cached_child = self._combine(enabled, level, self._default_ratio, record)
+            self._cached_child = self._combine(
+                enabled, level, self.defaults.sample_ratio, record
+            )
             self._cached = (
                 None if ratio is None else self._combine(enabled, level, ratio, record)
             )
@@ -511,15 +486,11 @@ class _PolicySource:
         level = self.level.current(context)
         if level == VERBOSITY_OFF:
             return self._disabled
-        ratio = self.ratio.current(context) if root else self._default_ratio
+        ratio = self.ratio.current(context) if root else self.defaults.sample_ratio
         return self._combine(enabled, level, ratio, self.record.current(context))
 
     def _combine(
-        self,
-        enabled: bool,
-        level: str,
-        ratio: tuple[float, bool],
-        record: bool = True,
+        self, enabled: bool, level: str, ratio: float, record: bool = True
     ) -> TelemetryPolicy:
         # Precedence: OTEL_SDK_DISABLED (the floor, see __init__) >
         # otelEnabled / telemetryLevel=OFF > recordSpan.
@@ -532,16 +503,11 @@ class _PolicySource:
         suppress_internal = {VERBOSITY_FULL: False, VERBOSITY_IO: True}.get(
             level, self.defaults.suppress_internal
         )
-        value, read = ratio
-        # A decision is only worth recording when the flag moved the ratio
-        # away from what the process would do anyway.
-        decided = read and value != self.defaults.sample_ratio
         return TelemetryPolicy(
             enabled=True,
             suppress_internal=suppress_internal,
             record_span=record,
-            sample_ratio=value,
-            sample_ratio_decided=decided,
+            sample_ratio=ratio,
         )
 
 

@@ -1,4 +1,5 @@
-"""Tests for the decision attributes recorded on kept root spans."""
+"""Tests for the opt-in OpenFeature OpenTelemetry hook, and that the
+extension never records flag evaluations on spans itself."""
 
 from __future__ import annotations
 
@@ -19,10 +20,6 @@ from otelfeature_instrument import flags
 from otelfeature_instrument.flags import SAMPLE_RATIO_FLAG_KEY, TelemetryPolicy, _PolicySource
 from otelfeature_instrument.sampling import flag_aware_sampler
 from otelfeature_instrument.tracing import _VerbosityAwareTracerProvider
-
-DECISION_KEYS = {"otelfeature.sample_ratio"}
-# Recording flag evaluations is the OpenFeature OpenTelemetry hook's job.
-FLAG_KEYS = {"feature_flag.key", "feature_flag.result.variant"}
 
 
 @pytest.fixture
@@ -45,120 +42,23 @@ def flagd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     feature_api.clear_providers()
 
 
-def _traced(n: int = 300):
-    exporter = InMemorySpanExporter()
-    provider = SDKTracerProvider(resource=Resource.create(), sampler=flag_aware_sampler({}))
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    tracer = _VerbosityAwareTracerProvider(provider).get_tracer("t")
-    for _ in range(n):
-        with tracer.start_as_current_span(
-            "GET /", kind=trace.SpanKind.SERVER, attributes={"url.path": "/"}
-        ):
-            tracer.start_span("child", kind=trace.SpanKind.CLIENT).end()
-    return exporter.get_finished_spans()
-
-
-def test_a_sampled_root_after_a_ratio_of_a_tenth_carries_the_decision(flagd):
+def test_the_extension_records_no_flag_attributes_on_spans(flagd):
+    """Which flag evaluated to what, or the applied ratio, is not the
+    extension's to record - the OpenFeature OpenTelemetry hook does that."""
     flagd({"defaultVariant": "tenth", "variants": {"tenth": 0.1, "all": 1.0}})
-
-    spans = _traced()
-    roots = [s for s in spans if s.parent is None]
-
-    assert roots, "nothing sampled at all"
-    for root in roots:
-        assert FLAG_KEYS.isdisjoint(root.attributes)
-        assert root.attributes["otelfeature.sample_ratio"] == 0.1
-        assert root.attributes["url.path"] == "/"  # start attributes kept
-
-
-def test_only_roots_carry_it(flagd):
-    flagd({"defaultVariant": "half", "variants": {"half": 0.5}})
-
-    children = [s for s in _traced() if s.parent is not None]
-
-    assert children
-    assert all(DECISION_KEYS.isdisjoint(child.attributes) for child in children)
-
-
-@pytest.mark.parametrize(
-    "flag, startup_ratio",
-    [
-        (None, 1.0),  # no flag at all
-        ({"defaultVariant": "all", "variants": {"all": 1.0}}, 1.0),  # flag = startup value
-        ({"defaultVariant": "text", "variants": {"text": "lots"}}, 0.5),  # unreadable: fallback
-    ],
-    ids=["no-flag", "flag-at-default", "fallback"],
-)
-def test_nothing_is_recorded_at_defaults(flagd, flag, startup_ratio):
-    flagd(flag, startup_ratio=startup_ratio)
-
-    spans = _traced()
-
-    assert spans
-    assert all(DECISION_KEYS.isdisjoint(span.attributes) for span in spans)
-
-
-def test_a_targeted_ratio_records_the_ratio_that_applied(flagd):
-    flagd(
-        {
-            "defaultVariant": "low",
-            "variants": {"low": 0.2, "high": 0.9},
-            "targeting": {"fractional": [{"var": "targetingKey"}, ["low", 50], ["high", 50]]},
-        }
-    )
-
-    roots = [s for s in _traced(400) if s.parent is None]
-    ratios = {root.attributes["otelfeature.sample_ratio"] for root in roots}
-
-    assert ratios == {0.2, 0.9}
-
-
-def test_the_static_path_builds_the_attributes_once(flagd):
-    flagd({"defaultVariant": "quarter", "variants": {"quarter": 0.25}})
-    first = flags._policy_source.cached.decision_attributes
-
-    _traced(50)
-
-    assert flags._policy_source.cached.decision_attributes is first
-    assert TelemetryPolicy().decision_attributes is None
-
-
-def test_the_shared_attributes_are_read_only():
-    policy = _PolicySource()._combine(True, "FULL", (0.25, True))
-
-    with pytest.raises(TypeError):
-        policy.decision_attributes["otelfeature.sample_ratio"] = 1.0
-
-
-@pytest.mark.parametrize(
-    "variant_value, startup_ratio, recorded",
-    [
-        (5, 0.5, 1.0),  # clamped to 1.0, which differs from the startup 0.5
-        (5, 1.0, None),  # clamped to exactly the startup value: no decision
-        (1, 1.0, None),  # an int equal to the startup float
-    ],
-)
-def test_clamped_and_int_values(flagd, variant_value, startup_ratio, recorded):
-    flagd({"defaultVariant": "v", "variants": {"v": variant_value}}, startup_ratio=startup_ratio)
-
-    roots = [s for s in _traced(50) if s.parent is None]
-
-    assert roots
-    assert {root.attributes.get("otelfeature.sample_ratio") for root in roots} == {recorded}
-
-
-def test_the_applications_own_attributes_win(flagd):
-    flagd({"defaultVariant": "all", "variants": {"all": 1.0}}, startup_ratio=0.5)
     exporter = InMemorySpanExporter()
     provider = SDKTracerProvider(resource=Resource.create(), sampler=flag_aware_sampler({}))
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = _VerbosityAwareTracerProvider(provider).get_tracer("t")
 
-    tracer.start_span("root", attributes={"feature_flag.key": "appFlag"}).end()
+    for _ in range(300):
+        with tracer.start_as_current_span("root", kind=trace.SpanKind.SERVER):
+            tracer.start_span("child").end()
 
-    (root,) = exporter.get_finished_spans()
-    assert root.attributes["feature_flag.key"] == "appFlag"
-    assert root.attributes["otelfeature.sample_ratio"] == 1.0
+    spans = exporter.get_finished_spans()
+    assert spans, "nothing sampled at all"
+    for span in spans:
+        assert not any(key.startswith(("feature_flag.", "otelfeature.")) for key in span.attributes)
 
 
 # --------------------------------------------------------------------------

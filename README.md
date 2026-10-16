@@ -327,21 +327,10 @@ and tooling as every other flag. (OpenTelemetry Python ships no
 `jaeger_remote` sampler, and `otelfeature-instrument` doesn't load sampler
 entry points; the comparison is with the other SDKs and the Collector.)
 
-### Recording the applied ratio on spans
-
-A root span kept under a **non-default** `traceSampleRatio` - the flag set a
-ratio other than the startup value - records the ratio it applied as
-`otelfeature.sample_ratio`, so a backend can re-weight counts (a span kept
-at `0.1` stands for ten). Root spans only (children inherit their root's
-decision), and nothing is added when everything is at defaults: no flag,
-the flag at the startup value, or a flag that couldn't be read. On the
-static path the attribute is built once per cached policy, not per span.
-The span's own start attributes win on a clash.
-
 ### Flag evaluations as span events (opt-in)
 
-*Which* flag evaluated to *what* is not recorded by the extension: that is
-the job of the [OpenFeature OpenTelemetry hook](https://github.com/open-feature/python-sdk-contrib/tree/main/hooks/openfeature-hooks-opentelemetry),
+The extension records nothing about its decisions on spans - not which
+flag evaluated to what, not the applied ratio. That is the job of the [OpenFeature OpenTelemetry hook](https://github.com/open-feature/python-sdk-contrib/tree/main/hooks/openfeature-hooks-opentelemetry),
 registered by whoever wants it - typically the application, for its own
 flags.
 
