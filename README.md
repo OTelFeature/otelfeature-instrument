@@ -233,7 +233,8 @@ boolean flag `recordSpan` (default `true`), evaluated against the
 
 - **A non-root span** with `recordSpan=false` is suppressed like an `IO`
   span: never created, its children attach to the nearest kept ancestor.
-- **A root span** (no valid parent) with `recordSpan=false` drops its
+- **A root span** (no valid parent, or an incoming request - see below)
+  with `recordSpan=false` drops its
   **whole trace**: it gets a valid but *non-sampled* span context, so its
   children aren't sampled either and outgoing calls carry `traceparent`
   with `sampled=0` - downstream services drop that trace too, instead of

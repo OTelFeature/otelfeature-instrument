@@ -275,8 +275,9 @@ def _remote(sampled: bool = True):
     )
 
 
+@pytest.mark.parametrize("sampled", [True, False], ids=["sampled-caller", "unsampled-caller"])
 @pytest.mark.parametrize("kind", [trace.SpanKind.SERVER, trace.SpanKind.CONSUMER])
-def test_a_proxied_health_check_leaves_no_spans_at_all(flagd, kind):
+def test_a_proxied_health_check_leaves_no_spans_at_all(flagd, kind, sampled):
     """A proxy that traces its probes sends a sampled traceparent: the request
     still counts as a root here, and the whole request is dropped."""
     flagd({RECORD_SPAN_FLAG_KEY: HEALTH_CHECKS})
@@ -284,7 +285,7 @@ def test_a_proxied_health_check_leaves_no_spans_at_all(flagd, kind):
     tracer = _tracer(exporter)
 
     with tracer.start_as_current_span(
-        "GET /health", context=_remote(), kind=kind, attributes={"url.path": "/health"}
+        "GET /health", context=_remote(sampled), kind=kind, attributes={"url.path": "/health"}
     ) as dropped:
         with tracer.start_as_current_span("handler"):
             tracer.start_span("SELECT 1", kind=trace.SpanKind.CLIENT).end()
@@ -344,3 +345,30 @@ def test_a_provider_error_records(flagd, monkeypatch):
 
 def test_the_resolver_uses_the_configured_key():
     assert flags._RecordSpanResolver.flag_key == RECORD_SPAN_FLAG_KEY == record_span_flag_key()
+
+
+def test_a_static_record_span_false_drops_proxied_requests_in_the_callers_trace(flagd):
+    flagd({RECORD_SPAN_FLAG_KEY: {"state": "ENABLED", "defaultVariant": "off", "variants": {"off": False}}})
+    assert flags._policy_source.cached is not None  # the static path
+    exporter = InMemorySpanExporter()
+
+    dropped = _tracer(exporter).start_span("GET /", context=_remote(), kind=trace.SpanKind.SERVER)
+
+    assert dropped.get_span_context().trace_id == 0xABC
+    assert not dropped.get_span_context().trace_flags.sampled
+
+
+def test_a_remote_parent_with_an_invalid_span_id_is_a_plain_root(flagd):
+    """An invalid context means no parent: a fresh, unsampled trace."""
+    flagd({RECORD_SPAN_FLAG_KEY: HEALTH_CHECKS})
+    invalid = trace.set_span_in_context(
+        trace.NonRecordingSpan(trace.SpanContext(trace_id=0xABC, span_id=0, is_remote=True))
+    )
+
+    dropped = _tracer(InMemorySpanExporter()).start_span(
+        "GET /health", context=invalid, kind=trace.SpanKind.SERVER, attributes={"url.path": "/health"}
+    )
+
+    context = dropped.get_span_context()
+    assert context.is_valid and context.trace_id != 0xABC
+    assert not context.trace_flags.sampled
