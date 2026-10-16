@@ -30,8 +30,12 @@ otelfeature-instrument = "otelfeature_instrument.cli:run"
 dev = ["pytest==9.1.1", "otelfeature-instrument[tracing-hook]"]
 
 [build-system]
-requires = ["hatchling"]
+# Pinned so a release build is reproducible.
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/otelfeature_instrument"]

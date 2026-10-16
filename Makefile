@@ -23,9 +23,9 @@ shell: image
 	$(DOCKER_RUN) -it $(IMAGE) bash
 
 # Wheel and sdist into dist/ (what the release workflow attaches).
-dist:
+dist: image
 	$(DOCKER_RUN) $(IMAGE) uv build --out-dir dist
 
 # Fail unless TAG (e.g. v0.3.0) matches the version in pyproject.toml.
-check-version:
+check-version: image
 	$(DOCKER_RUN) $(IMAGE) python ci/check_tag_version.py "$(TAG)"

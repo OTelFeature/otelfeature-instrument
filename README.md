@@ -588,11 +588,12 @@ git tag v0.3.0 && git push origin v0.3.0
 ```
 
 [`.github/workflows/release.yml`](.github/workflows/release.yml) then, in
-the toolchain image: checks the tag against `version` in `pyproject.toml`
+the toolchain image: checks the tag - `vX.Y.Z`, or `vX.Y.Z-rc.N` for a
+pre-release - against `version` in `pyproject.toml` and `__version__`
 (and fails if they differ), runs the tests, builds with `uv build`, and
-creates the release with generated notes. A tag like `v0.3.0-rc.1` (version
-`0.3.0rc1`) becomes a pre-release - the way to try unreleased code on the
-demo stage. Locally: `make dist` builds both artifacts into `dist/`,
+creates the release with generated notes (a re-run re-uploads the assets).
+A tag like `v0.3.0-rc.1` (version `0.3.0rc1`) becomes a pre-release - the
+way to try unreleased code on the demo stage. Locally: `make dist` builds both artifacts into `dist/`,
 `make check-version TAG=v0.3.0` runs the tag check.
 
 To depend on a release, pin the git tag, e.g. with uv:

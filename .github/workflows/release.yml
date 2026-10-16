@@ -1,6 +1,6 @@
 # Release: pushing a `v*` tag builds the wheel and sdist in the toolchain image
 # (ci/Dockerfile) and publishes them as a GitHub Release (spec C-006).
-# `v*-rc.*` tags become pre-releases. PyPI publishing is out of scope for now.
+# `vX.Y.Z-rc.N` tags become pre-releases. PyPI publishing is out of scope.
 name: Release
 
 on:
@@ -32,26 +32,39 @@ jobs:
           cache-from: type=gha,scope=ci-image
           cache-to: type=gha,mode=max,scope=ci-image
 
-      - name: Check the tag matches pyproject.toml
-        run: make check-version TAG="$GITHUB_REF_NAME"
+      # vX.Y.Z or vX.Y.Z-rc.N, equal to pyproject.toml and __version__;
+      # also decides whether this is a pre-release.
+      - name: Check the tag matches the package version
+        id: version
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD":/workspace -w /workspace otelfeature-instrument-ci \
+            python ci/check_tag_version.py "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Test
         run: make test-only
 
       - name: Build wheel and sdist
-        run: make dist
+        run: docker run --rm -v "$PWD":/workspace -w /workspace otelfeature-instrument-ci uv build --out-dir dist
 
+      # Idempotent: a re-run (e.g. after a failed upload) re-uploads the
+      # assets to the existing release instead of failing.
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           set -euo pipefail
-          prerelease=()
-          if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then
-            prerelease=(--prerelease)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            prerelease=()
+            if [[ "$PRERELEASE" == "true" ]]; then
+              prerelease=(--prerelease)
+            fi
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              "${prerelease[@]}"
           fi
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            "${prerelease[@]}"
