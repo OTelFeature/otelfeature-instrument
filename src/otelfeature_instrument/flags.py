@@ -368,11 +368,13 @@ _KNOWN_LEVELS = frozenset({VERBOSITY_FULL, VERBOSITY_IO, VERBOSITY_OFF})
 
 
 class _SampleRatioResolver(_CachingResolver):
-    """Resolves `traceSampleRatio`, never raising on the hot path.
+    """Resolves `traceSampleRatio`, never raising on the hot path (NFR-001,
+    UC-004 A1).
 
-    Out of range is clamped to 0.0-1.0; anything that isn't a number (NaN
-    included) falls back to the startup value. A non-numeric variant never
-    gets here: the SDK reports a type mismatch and serves the default.
+    Above 1.0 is clamped to 1.0. A negative value, NaN, infinity or anything
+    that isn't a number is invalid and falls back to the startup ratio,
+    logged once. A non-numeric variant never gets here: the SDK reports a
+    type mismatch and serves the default.
     """
 
     flag_key = SAMPLE_RATIO_FLAG_KEY
@@ -385,17 +387,29 @@ class _SampleRatioResolver(_CachingResolver):
         return client.get_float_details(self.flag_key, self.default, context, *_hook_options)
 
     def _normalise(self, value) -> float:
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
-            self._warn_once(value, "is not a number - using the startup value")
+        ratio = None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                ratio = float(value)  # an int too large for a float raises
+            except OverflowError:
+                ratio = None
+        if ratio is None or not math.isfinite(ratio) or ratio < 0:
+            self._warn_once(
+                value, "is not a valid ratio (negative, NaN, infinite or not a number) - "
+                "using the startup value"
+            )
             return self.default
-        if 0.0 <= value <= 1.0:
-            return float(value)
-        self._warn_once(value, "is outside 0.0-1.0 - clamping")
-        return min(1.0, max(0.0, float(value)))
+        if ratio <= 1.0:
+            # Valid again: the next bad value is a new state change and logs.
+            self._reported_invalid = None
+            return ratio
+        self._warn_once(value, "is above 1.0 - clamping to 1.0")
+        return 1.0
 
     def _warn_once(self, value, problem: str) -> None:
-        # Once per offending value; a benign race may log it twice. Compared
-        # by repr() because NaN never equals itself.
+        # Once per state change (NFR-001): per offending value, reset by a
+        # valid one; a benign race may log it twice. Compared by repr()
+        # because NaN never equals itself.
         if repr(value) == self._reported_invalid:
             return
         self._reported_invalid = repr(value)
