@@ -676,7 +676,7 @@ def test_static_flags_serve_one_cached_policy():
         evaluations = client.calls
         policies = [source.current() for _ in range(5)]
 
-    assert client.calls == evaluations == 2
+    assert client.calls == evaluations == 3  # one probe per flag
     assert all(policy is source.cached for policy in policies)
     assert source.cached == TelemetryPolicy(enabled=True, suppress_internal=True)
 
@@ -792,10 +792,9 @@ def test_a_missing_flag_is_logged_once_at_info(caplog):
             source.current()
 
     not_defined = [r for r in caplog.records if "is not defined" in r.getMessage()]
-    assert sorted(r.getMessage().split()[1] for r in not_defined) == [
-        OTEL_ENABLED_FLAG_KEY,
-        TRACE_VERBOSITY_FLAG_KEY,
-    ]
+    assert sorted(r.getMessage().split()[1] for r in not_defined) == sorted(
+        [OTEL_ENABLED_FLAG_KEY, TRACE_VERBOSITY_FLAG_KEY, flags.RECORD_SPAN_FLAG_KEY]
+    )
     assert {r.levelname for r in not_defined} == {"INFO"}
 
 
@@ -890,7 +889,7 @@ def test_a_missing_flag_is_logged_once_even_when_classified(caplog):
         _PolicySource().classify(EventDetails())
 
     messages = [r.getMessage() for r in caplog.records]
-    assert len(messages) == 2  # one "is not defined" per flag, nothing else
+    assert len(messages) == 3  # one "is not defined" per flag, nothing else
     assert all("is not defined" in m for m in messages)
 
 

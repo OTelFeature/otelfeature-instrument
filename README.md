@@ -23,6 +23,7 @@ re-read live:
 | `telemetryLevel` | `OFF`   | every span suppressed                                     |
 | `otelEnabled`    | `true`  | no effect, `telemetryLevel` decides (default)             |
 | `otelEnabled`    | `false` | every span suppressed - identical to `telemetryLevel=OFF` |
+| `recordSpan`     | `false` | the span is dropped - per span when a targeting rule decides it (see [Dropping selected spans](#dropping-selected-spans-recordspan)) |
 
 `otelEnabled` is the plain on/off switch; `OFF` is the same thing for
 operators who already manage `telemetryLevel`. Both **fail open**: a missing
@@ -155,6 +156,7 @@ Enforcement points never read a flag directly. `current_policy()` in
 |---------------------|-----------------------------------------------|-----------------------------------|
 | `enabled`           | `otelEnabled` and `telemetryLevel != OFF`      | `OTEL_SDK_DISABLED` is not `true` (a hard floor) |
 | `suppress_internal` | `telemetryLevel == IO`                        | `false`                           |
+| `record_span`       | `recordSpan` (only while `enabled`)           | `true`                            |
 
 **Every field falls back to its startup value**, resolved from the
 environment once when the process starts. With flagd unreachable or a flag
@@ -211,6 +213,56 @@ SDK emits the event, and the kept answer is replaced - which is why the
 `rpc`/OFREP resolvers would not do. Handlers run on the SDK's own executor,
 so for a brief moment after startup spans fall through to a direct
 evaluation: the right answer, just not yet the cheap one.
+
+### Dropping selected spans: `recordSpan`
+
+`otelEnabled` and `telemetryLevel=OFF` drop everything. To drop only the
+spans a rule matches - health checks, one noisy instrumentation - use the
+boolean flag `recordSpan` (default `true`), evaluated against the
+[evaluation context](#the-evaluation-context) of each span:
+
+```json
+"recordSpan": {
+  "state": "ENABLED", "defaultVariant": "on",
+  "variants": { "on": true, "off": false },
+  "targeting": { "if": [ { "and": [
+      { "==": [ { "var": "service.name" }, "geocode" ] },
+      { "==": [ { "var": "url.path" }, "/health" ] } ] }, "off", null ] }
+}
+```
+
+- **A non-root span** with `recordSpan=false` is suppressed like an `IO`
+  span: never created, its children attach to the nearest kept ancestor.
+- **A root span** (no valid parent, or an incoming request - see below)
+  with `recordSpan=false` drops its
+  **whole trace**: it gets a valid but *non-sampled* span context, so its
+  children aren't sampled either and outgoing calls carry `traceparent`
+  with `sampled=0` - downstream services drop that trace too, instead of
+  each starting a new one (unlike `OFF`, see
+  [Known limitations](#off-leaves-gaps-in-traces)). This relies on
+  **parent-based sampling**, here and downstream: the SDK default
+  (`parentbased_always_on`), and what `otelfeature-instrument` installs. A
+  non-parent-based sampler (`OTEL_TRACES_SAMPLER=always_on` or
+  `traceidratio`) would sample the children anyway, parented to a span that
+  was never exported.
+- **An incoming request counts as a root**, even with a remote parent: a
+  `SERVER` or `CONSUMER` span whose `traceparent` came from another service
+  drops the whole request here, exactly like a root - it gets a non-sampled
+  context in the *caller's* trace, so nothing below it is recorded and
+  outgoing calls carry `sampled=0`. A health check sent by a proxy or
+  gateway that traces its probes therefore leaves no spans in this service.
+  The trade-off: the trace ends at the caller - downstream services see
+  `sampled=0` and record nothing for it either. `INTERNAL` and `CLIENT`
+  spans with a remote parent are suppressed as children; their children
+  attach to the remote parent.
+- **Precedence:** `OTEL_SDK_DISABLED` (hard floor) > `otelEnabled` /
+  `telemetryLevel=OFF` > `recordSpan`. `recordSpan=true` never re-enables
+  anything the global switches turned off.
+- **Fails open:** a missing flag, a provider error or a non-boolean value
+  records the span.
+- **Static costs nothing:** without targeting, `recordSpan` is cached like
+  the other flags; with targeting it is evaluated per span.
+- The key can be renamed with `OTELFEATURE_RECORD_SPAN_FLAG_NAME`.
 
 ### The evaluation context
 
@@ -284,6 +336,7 @@ flag while it is being used, not left on permanently.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | -          | OTLP/HTTP collector endpoint for traces and metrics              |
 | `FLAGD_HOST`                  | `localhost`| flagd host                                                       |
 | `FLAGD_PORT`                  | `8015`     | flagd gRPC sync port (in-process resolver)                       |
+| `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | flagd key of the selective-drop flag |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
 

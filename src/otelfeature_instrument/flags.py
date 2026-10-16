@@ -55,6 +55,18 @@ VERBOSITY_OFF = "OFF"
 # means; it exists so the switch can be a plain boolean.
 OTEL_ENABLED_FLAG_KEY = "otelEnabled"
 
+# The selective drop: `false` drops just the spans a targeting rule matches
+# (and, for a root, its whole trace). Below the global switches - it never
+# re-enables what `otelEnabled`/`telemetryLevel=OFF` turned off.
+RECORD_SPAN_FLAG_NAME_ENV_VAR = "OTELFEATURE_RECORD_SPAN_FLAG_NAME"
+
+
+def record_span_flag_key(environ: Mapping[str, str] = os.environ) -> str:
+    return environ.get(RECORD_SPAN_FLAG_NAME_ENV_VAR, "").strip() or "recordSpan"
+
+
+RECORD_SPAN_FLAG_KEY = record_span_flag_key()
+
 
 @dataclass(frozen=True)
 class TelemetryPolicy:
@@ -68,6 +80,9 @@ class TelemetryPolicy:
     enabled: bool = True
     # Suppress `INTERNAL` spans. True when `telemetryLevel=IO`.
     suppress_internal: bool = False
+    # Record this span. False when `recordSpan` says so for it; only
+    # consulted while `enabled`.
+    record_span: bool = True
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] = os.environ) -> TelemetryPolicy:
@@ -266,6 +281,12 @@ class _EnabledResolver(_CachingResolver):
         return self.default if value is None else bool(value)
 
 
+class _RecordSpanResolver(_EnabledResolver):
+    """Resolves `recordSpan`; like `otelEnabled`, only an explicit `false` drops."""
+
+    flag_key = RECORD_SPAN_FLAG_KEY
+
+
 class _PolicySource:
     """Combines the flags into a `TelemetryPolicy`, one read per decision point."""
 
@@ -275,6 +296,7 @@ class _PolicySource:
         self.level = _VerbosityResolver(
             VERBOSITY_IO if self.defaults.suppress_internal else VERBOSITY_FULL
         )
+        self.record = _RecordSpanResolver(self.defaults.record_span)
         # Same contract as `_CachingResolver._cached`: set only while every
         # input flag is cached, so the static path stays one attribute read
         # and allocates nothing.
@@ -305,9 +327,12 @@ class _PolicySource:
         with self._classify_lock:
             self.enabled.classify(details)
             self.level.classify(details)
-            enabled, level = self.enabled.cached, self.level.cached
+            self.record.classify(details)
+            enabled, level, record = self.enabled.cached, self.level.cached, self.record.cached
             self._cached = (
-                None if enabled is None or level is None else self._combine(enabled, level)
+                None
+                if enabled is None or level is None or record is None
+                else self._combine(enabled, level, record)
             )
 
     def current(self, context: EvaluationContext | None = None) -> TelemetryPolicy:
@@ -316,12 +341,16 @@ class _PolicySource:
             return cached
         enabled = self.enabled.current(context)
         if not enabled:
-            # As before the refactor: with tracing off, `telemetryLevel` is
-            # not evaluated at all.
+            # With tracing off nothing else is evaluated at all.
             return self._disabled
-        return self._combine(enabled, self.level.current(context))
+        level = self.level.current(context)
+        if level == VERBOSITY_OFF:
+            return self._disabled
+        return self._combine(enabled, level, self.record.current(context))
 
-    def _combine(self, enabled: bool, level: str) -> TelemetryPolicy:
+    def _combine(self, enabled: bool, level: str, record: bool = True) -> TelemetryPolicy:
+        # Precedence: OTEL_SDK_DISABLED (the floor, see __init__) >
+        # otelEnabled / telemetryLevel=OFF > recordSpan.
         if not enabled or level == VERBOSITY_OFF:
             return self._disabled
         # An unknown `telemetryLevel` variant is no answer at all, so the
@@ -331,7 +360,9 @@ class _PolicySource:
         suppress_internal = {VERBOSITY_FULL: False, VERBOSITY_IO: True}.get(
             level, self.defaults.suppress_internal
         )
-        return TelemetryPolicy(enabled=True, suppress_internal=suppress_internal)
+        return TelemetryPolicy(
+            enabled=True, suppress_internal=suppress_internal, record_span=record
+        )
 
 
 # Captured at import, which is process startup: this module is imported from

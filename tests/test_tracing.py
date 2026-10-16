@@ -230,7 +230,7 @@ def test_real_policy_source_drives_the_tracer(monkeypatch, enabled, level, expor
 
     class _Client:
         def _get(self, key, default_value, context=None):
-            return FlagEvaluationDetails(flag_key=key, value=values[key], reason=Reason.STATIC)
+            return FlagEvaluationDetails(flag_key=key, value=values.get(key, True), reason=Reason.STATIC)
 
         get_string_details = get_boolean_details = _get
 
