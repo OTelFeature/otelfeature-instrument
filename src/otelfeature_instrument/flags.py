@@ -39,7 +39,7 @@ from openfeature.contrib.provider.flagd.config import ResolverType
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import EventDetails, ProviderEvent
 from openfeature.exception import ErrorCode
-from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
+from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOptions, Reason
 
 _logger = getLogger(__name__)
 
@@ -142,6 +142,50 @@ _RECLASSIFY_ON = (
     ProviderEvent.PROVIDER_ERROR,
     ProviderEvent.PROVIDER_STALE,
 )
+
+
+TRACING_HOOK_ENV_VAR = "OTELFEATURE_OPENFEATURE_TRACING_HOOK"
+
+# Extra arguments for every evaluation the extension makes: empty, or the
+# FlagEvaluationOptions carrying the OpenFeature OpenTelemetry hook when
+# opted into - see `enable_tracing_hook`.
+_hook_options: tuple = ()
+
+
+def enable_tracing_hook(environ: Mapping[str, str] = os.environ) -> bool:
+    """Attach the OpenFeature OpenTelemetry `TracingHook` to the extension's
+    own evaluations, if OTELFEATURE_OPENFEATURE_TRACING_HOOK=true.
+
+    Recording which flag evaluated to what is the hook's job, not the
+    extension's: it never writes `feature_flag.*` itself. Off by default, on
+    purpose: targeted (or erroring) flags are evaluated per span start, so the
+    hook adds a `feature_flag.evaluation` event per such flag per span -
+    exactly the kind of noise this project exists to remove. Recording the application's own
+    flag evaluations is the application's business (it registers the hook
+    itself); this only covers the extension's.
+
+    The hook writes to the span that is current during the evaluation: the
+    *parent* of the span being decided. Evaluations for a new root (no
+    current span), `traceSampleRatio` among them, therefore record nothing.
+    Errors are not recorded as exceptions (`exclude_exceptions`): a flagd
+    outage would otherwise add one to an application span per evaluation.
+    """
+    global _hook_options
+    if environ.get(TRACING_HOOK_ENV_VAR, "").strip().lower() != "true":
+        _hook_options = ()
+        return False
+    try:
+        from openfeature.contrib.hook.opentelemetry import TracingHook  # noqa: PLC0415
+    except ImportError:
+        _logger.warning(
+            "otelfeature-instrument: %s=true, but openfeature-hooks-opentelemetry is "
+            "not installed (pip install 'otelfeature-instrument[tracing-hook]')",
+            TRACING_HOOK_ENV_VAR,
+        )
+        _hook_options = ()
+        return False
+    _hook_options = (FlagEvaluationOptions(hooks=[TracingHook(exclude_exceptions=True)]),)
+    return True
 
 
 class _CachingResolver:
@@ -282,7 +326,7 @@ class _VerbosityResolver(_CachingResolver):
         self._reported_unknown: str | None = None
 
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
-        return client.get_string_details(self.flag_key, self.default, context)
+        return client.get_string_details(self.flag_key, self.default, context, *_hook_options)
 
     def _normalise(self, value) -> str:
         level = (value or self.default).strip().upper()
@@ -316,7 +360,7 @@ class _SampleRatioResolver(_CachingResolver):
         self._reported_invalid: object = None
 
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
-        return client.get_float_details(self.flag_key, self.default, context)
+        return client.get_float_details(self.flag_key, self.default, context, *_hook_options)
 
     def _normalise(self, value) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
@@ -347,7 +391,7 @@ class _EnabledResolver(_CachingResolver):
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
         # A missing flag, a provider error or a non-boolean variant all come
         # back from the SDK as `self.default` (reason ERROR).
-        return client.get_boolean_details(self.flag_key, self.default, context)
+        return client.get_boolean_details(self.flag_key, self.default, context, *_hook_options)
 
     def _normalise(self, value) -> bool:
         return self.default if value is None else bool(value)
@@ -474,6 +518,7 @@ _handlers_registered = False
 
 
 def configure_feature_flags() -> None:
+    enable_tracing_hook()
     provider = os.environ.get(FLAG_PROVIDER_ENV_VAR, FLAG_PROVIDER_FLAGD).strip().lower()
     if provider == FLAG_PROVIDER_NONE:
         # Still worth listening: the application may register its own provider

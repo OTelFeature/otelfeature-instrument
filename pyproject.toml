@@ -18,11 +18,16 @@ dependencies = [
     "opentelemetry-sdk==1.45.1",
 ]
 
+[project.optional-dependencies]
+# Opt-in recording of the extension's own flag evaluations as span events,
+# enabled with OTELFEATURE_OPENFEATURE_TRACING_HOOK=true (see README).
+tracing-hook = ["openfeature-hooks-opentelemetry==0.3.1"]
+
 [project.scripts]
 otelfeature-instrument = "otelfeature_instrument.cli:run"
 
 [dependency-groups]
-dev = ["pytest==9.1.1"]
+dev = ["pytest==9.1.1", "otelfeature-instrument[tracing-hook]"]
 
 [build-system]
 requires = ["hatchling"]

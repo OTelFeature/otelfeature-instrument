@@ -327,6 +327,32 @@ and tooling as every other flag. (OpenTelemetry Python ships no
 `jaeger_remote` sampler, and `otelfeature-instrument` doesn't load sampler
 entry points; the comparison is with the other SDKs and the Collector.)
 
+### Flag evaluations as span events (opt-in)
+
+The extension records nothing about its decisions on spans - not which
+flag evaluated to what, not the applied ratio. That is the job of the [OpenFeature OpenTelemetry hook](https://github.com/open-feature/python-sdk-contrib/tree/main/hooks/openfeature-hooks-opentelemetry),
+registered by whoever wants it - typically the application, for its own
+flags.
+
+For the extension's own evaluations it can be switched on with
+`OTELFEATURE_OPENFEATURE_TRACING_HOOK=true` (install
+`otelfeature-instrument[tracing-hook]`). It is **off by default on
+purpose**: a static flag is not evaluated per span, but a flag with
+targeting - or one in an error state, e.g. during a flagd outage - is, and
+each evaluation adds a `feature_flag.evaluation` event: one per such flag
+per span start, so up to three on a child's parent (`otelEnabled`,
+`telemetryLevel`, `recordSpan`) plus one per root for `traceSampleRatio`.
+On a busy service that is exactly the noise this project removes. Use it to
+debug a rule, not permanently.
+
+Where the events land: on the span that is current while the flag is
+evaluated - the **parent** of the span being decided, since that span
+doesn't exist yet. So targeted `otelEnabled` / `telemetryLevel` /
+`recordSpan` evaluations for child spans show up on their parent, while
+evaluations for a **new root** - including every `traceSampleRatio`
+evaluation - have no current span and record nothing. Evaluation errors
+are not recorded as exceptions on application spans.
+
 ### The evaluation context
 
 When a flag carries `targeting`, each span start is described to it in
@@ -459,6 +485,7 @@ can close the loop on its own - no outside script, no new metric:
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | flagd key of the selective-drop flag |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
+| `OTELFEATURE_OPENFEATURE_TRACING_HOOK` | `false` | `true` records the extension's own flag evaluations as span events (needs the `tracing-hook` extra; adds an event per targeted evaluation) |
 | `OTEL_METRICS_EXPORTER`       | `otlp`     | `none` installs no meter provider at all - and so no error rate. Only `none` is recognised; any other value still exports via OTLP/HTTP |
 | `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections (see [Error rate](#error-rate-in-the-context)) |
 | `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10` | Minimum requests per interval before an error rate is published |
