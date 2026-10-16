@@ -219,12 +219,6 @@ def test_record_span_true_never_re_enables_what_the_global_switches_turned_off(
     assert exporter.get_finished_spans() == ()
 
 
-def test_record_span_false_is_below_the_global_switches_in_the_policy():
-    source = _PolicySource()
-    assert source._combine(True, "FULL", False) == TelemetryPolicy(record_span=False)
-    assert source._combine(False, "FULL", True).enabled is False
-
-
 @pytest.mark.parametrize(
     "environ, key",
     [({}, "recordSpan"), ({"OTELFEATURE_RECORD_SPAN_FLAG_NAME": " dropSpan "}, "dropSpan"),
@@ -232,3 +226,81 @@ def test_record_span_false_is_below_the_global_switches_in_the_policy():
 )
 def test_the_flag_key_can_be_overridden(environ, key):
     assert record_span_flag_key(environ) == key
+
+
+
+def test_a_dropped_root_keeps_the_trace_id_it_was_evaluated_on(flagd, monkeypatch):
+    from otelfeature_instrument import tracing
+
+    flagd({RECORD_SPAN_FLAG_KEY: HEALTH_CHECKS})
+    keys = []
+    original = tracing.current_policy
+
+    def spy(context=None, **kwargs):
+        keys.append(context.targeting_key)
+        return original(context, **kwargs)
+
+    monkeypatch.setattr(tracing, "current_policy", spy)
+    tracer = _tracer(InMemorySpanExporter())
+
+    root = tracer.start_span("GET /health", kind=trace.SpanKind.SERVER, attributes={"url.path": "/health"})
+
+    assert format(root.get_span_context().trace_id, "032x") == keys[0]
+
+
+def test_a_static_record_span_false_drops_every_trace_unsampled(flagd):
+    flagd({RECORD_SPAN_FLAG_KEY: {"state": "ENABLED", "defaultVariant": "off", "variants": {"off": False}}})
+    assert flags._policy_source.cached is not None  # the static path
+    exporter = InMemorySpanExporter()
+
+    headers = _request(_tracer(exporter), "/weather")
+
+    assert headers["traceparent"].endswith("-00")
+    assert exporter.get_finished_spans() == ()
+
+
+def test_a_span_with_a_remote_parent_is_suppressed_as_a_non_root(flagd):
+    """Documented behaviour: a remote parent makes the span a non-root, so
+    its children attach to that parent (and follow its sampling)."""
+    flagd({RECORD_SPAN_FLAG_KEY: HEALTH_CHECKS})
+    exporter = InMemorySpanExporter()
+    tracer = _tracer(exporter)
+    remote = trace.set_span_in_context(
+        trace.NonRecordingSpan(
+            trace.SpanContext(
+                trace_id=0xABC, span_id=0xDEF, is_remote=True,
+                trace_flags=trace.TraceFlags(trace.TraceFlags.SAMPLED),
+            )
+        )
+    )
+
+    with tracer.start_as_current_span(
+        "GET /health", context=remote, kind=trace.SpanKind.SERVER, attributes={"url.path": "/health"}
+    ):
+        tracer.start_span("handler").end()
+
+    (handler,) = exporter.get_finished_spans()
+    assert handler.parent.span_id == 0xDEF
+
+
+def test_a_provider_error_records(flagd, monkeypatch):
+    from openfeature.exception import ErrorCode
+    from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
+
+    flagd({RECORD_SPAN_FLAG_KEY: HEALTH_CHECKS})
+
+    def broken(self, client, context):
+        return FlagEvaluationDetails(
+            flag_key=self.flag_key, value=True, reason=Reason.ERROR, error_code=ErrorCode.GENERAL
+        )
+
+    monkeypatch.setattr(flags._RecordSpanResolver, "_read", broken)
+    exporter = InMemorySpanExporter()
+
+    _request(_tracer(exporter), "/health")
+
+    assert len(exporter.get_finished_spans()) == 3
+
+
+def test_the_resolver_uses_the_configured_key():
+    assert flags._RecordSpanResolver.flag_key == RECORD_SPAN_FLAG_KEY == record_span_flag_key()

@@ -23,7 +23,7 @@ re-read live:
 | `telemetryLevel` | `OFF`   | every span suppressed                                     |
 | `otelEnabled`    | `true`  | no effect, `telemetryLevel` decides (default)             |
 | `otelEnabled`    | `false` | every span suppressed - identical to `telemetryLevel=OFF` |
-| `recordSpan`     | `false` | just the spans a targeting rule matches are dropped (see [Dropping selected spans](#dropping-selected-spans-recordspan)) |
+| `recordSpan`     | `false` | the span is dropped - per span when a targeting rule decides it (see [Dropping selected spans](#dropping-selected-spans-recordspan)) |
 
 `otelEnabled` is the plain on/off switch; `OFF` is the same thing for
 operators who already manage `telemetryLevel`. Both **fail open**: a missing
@@ -233,11 +233,19 @@ boolean flag `recordSpan` (default `true`), evaluated against the
 
 - **A non-root span** with `recordSpan=false` is suppressed like an `IO`
   span: never created, its children attach to the nearest kept ancestor.
-- **A root span** with `recordSpan=false` drops its **whole trace**: it gets
-  a valid but *non-sampled* span context, so its children aren't sampled
-  either and outgoing calls carry `traceparent` with `sampled=0` -
-  downstream services drop that trace too, instead of each starting a new
-  one (unlike `OFF`, see [Known limitations](#off-leaves-gaps-in-traces)).
+- **A root span** (no valid parent) with `recordSpan=false` drops its
+  **whole trace**: it gets a valid but *non-sampled* span context, so its
+  children aren't sampled either and outgoing calls carry `traceparent`
+  with `sampled=0` - downstream services drop that trace too, instead of
+  each starting a new one (unlike `OFF`, see
+  [Known limitations](#off-leaves-gaps-in-traces)). This relies on
+  **parent-based sampling**, here and downstream: the SDK default
+  (`parentbased_always_on`), and what `otelfeature-instrument` installs. A
+  non-parent-based sampler (`OTEL_TRACES_SAMPLER=always_on` or
+  `traceidratio`) would sample the children anyway, parented to a span that
+  was never exported.
+- **A span with a remote parent** (an incoming `traceparent`) counts as a
+  non-root: it is suppressed, and its children attach to the remote parent.
 - **Precedence:** `OTEL_SDK_DISABLED` (hard floor) > `otelEnabled` /
   `telemetryLevel=OFF` > `recordSpan`. `recordSpan=true` never re-enables
   anything the global switches turned off.
