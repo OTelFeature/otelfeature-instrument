@@ -1,4 +1,4 @@
-"""Feature-flag wiring backing the `telemetryLevel` verbosity check.
+"""Feature-flag wiring backing the `otelEnabled` and `telemetryLevel` checks.
 
 Registering a flagd provider is the default, but it's gated by
 `OTELFEATURE_FLAG_PROVIDER` rather than unconditional: this module runs from
@@ -10,8 +10,8 @@ over OpenFeature configuration on its own terms (at any point - the resolver
 below always reads the *current* global provider, not a snapshot taken at
 startup).
 
-`telemetryLevel` is evaluated once while the flag is static and per span once
-it carries targeting, with the classification redone on provider events. See
+Both flags are evaluated once while static and per span once they carry
+targeting, with the classification redone on provider events. See
 "Evaluating once, or evaluating always" in the README for what each resolution
 reason implies and why keeping an answer is safe; the comments below cover the
 local decisions only.
@@ -38,6 +38,11 @@ FLAG_PROVIDER_NONE = "none"
 TRACE_VERBOSITY_FLAG_KEY = "telemetryLevel"
 VERBOSITY_FULL = "FULL"
 VERBOSITY_IO = "IO"
+VERBOSITY_OFF = "OFF"
+
+# The on-stage kill switch. `false` means exactly what `telemetryLevel=OFF`
+# means; it exists so the switch can be a plain boolean.
+OTEL_ENABLED_FLAG_KEY = "otelEnabled"
 
 # Every provider event is a reason to re-classify: READY is the first chance to
 # ask at all, CONFIGURATION_CHANGED means the ruleset moved, and ERROR/STALE
@@ -50,19 +55,22 @@ _RECLASSIFY_ON = (
 )
 
 
-class _VerbosityResolver:
-    """Resolves `telemetryLevel`, evaluating once when the flag is static."""
+class _CachingResolver:
+    """Resolves one flag, evaluating once when the flag is static."""
+
+    flag_key: str
 
     def __init__(self) -> None:
         # `None` means "not cacheable, evaluate per span". A plain attribute
         # rather than a lock: it's written by the provider's event thread and
         # read by every span, and a torn read is not possible - the worst a
         # race can do is serve the previous classification for one more span,
-        # which the next event corrects.
-        self._cached: str | None = None
+        # which the next event corrects. Flag values are never `None`
+        # themselves, so a cached `False` is still a cached answer.
+        self._cached: object | None = None
 
     @property
-    def cached(self) -> str | None:
+    def cached(self):
         return self._cached
 
     def classify(self, details: EventDetails | None = None) -> None:
@@ -75,7 +83,7 @@ class _VerbosityResolver:
         # classification cannot have changed. Other events (READY, ERROR,
         # STALE) carry no key list and always re-classify.
         changed = getattr(details, "flags_changed", None)
-        if changed and TRACE_VERBOSITY_FLAG_KEY not in changed:
+        if changed and self.flag_key not in changed:
             return
 
         value, reason = self._evaluate()
@@ -90,19 +98,19 @@ class _VerbosityResolver:
                 _logger.info(
                     "otelfeature-instrument: %s resolves with reason=%s - "
                     "evaluating per span",
-                    TRACE_VERBOSITY_FLAG_KEY,
+                    self.flag_key,
                     reason,
                 )
             else:
                 _logger.info(
                     "otelfeature-instrument: %s is static (%s) - serving %s "
                     "without further evaluation",
-                    TRACE_VERBOSITY_FLAG_KEY,
+                    self.flag_key,
                     reason,
                     self._cached,
                 )
 
-    def current(self, context: EvaluationContext | None = None) -> str:
+    def current(self, context: EvaluationContext | None = None):
         cached = self._cached
         if cached is not None:
             # The point of the whole exercise: on the static path no
@@ -110,17 +118,46 @@ class _VerbosityResolver:
             return cached
         return self._evaluate(context)[0]
 
+    def _evaluate(self, context: EvaluationContext | None = None) -> tuple[object, object]:
+        """Return `(value, reason)`.
+
+        Implementations always read the live global provider rather than
+        something captured at configure_feature_flags() time, so an app that
+        registers its own provider later is picked up without restarting
+        anything.
+        """
+        raise NotImplementedError
+
+
+class _VerbosityResolver(_CachingResolver):
+    """Resolves `telemetryLevel`. Anything but `IO`/`OFF` behaves as `FULL`."""
+
+    flag_key = TRACE_VERBOSITY_FLAG_KEY
+
     def _evaluate(self, context: EvaluationContext | None = None) -> tuple[str, object]:
-        # Always reads the live global provider rather than something captured
-        # at configure_feature_flags() time, so an app that registers its own
-        # provider later is picked up without restarting anything.
         details = feature_api.get_client().get_string_details(
-            TRACE_VERBOSITY_FLAG_KEY, VERBOSITY_FULL, context
+            self.flag_key, VERBOSITY_FULL, context
         )
         return (details.value or VERBOSITY_FULL).strip().upper(), details.reason
 
 
+class _EnabledResolver(_CachingResolver):
+    """Resolves `otelEnabled`. Fails open: only an explicit `false` disables."""
+
+    flag_key = OTEL_ENABLED_FLAG_KEY
+
+    def _evaluate(self, context: EvaluationContext | None = None) -> tuple[bool, object]:
+        # A missing flag, a provider error or a non-boolean variant all come
+        # back from the SDK as our default `True` (reason ERROR); `is not False`
+        # also covers a provider that hands back `None`.
+        details = feature_api.get_client().get_boolean_details(
+            self.flag_key, True, context
+        )
+        return details.value is not False, details.reason
+
+
 _resolver = _VerbosityResolver()
+_enabled_resolver = _EnabledResolver()
 _handlers_registered = False
 
 
@@ -157,7 +194,8 @@ def _register_event_handlers() -> None:
         # The SDK runs a handler immediately if the provider is already in the
         # matching state (see openfeature/_event_support.py), so registering
         # before or after set_provider() both end up classifying.
-        feature_api.add_handler(event, _resolver.classify)
+        for resolver in (_enabled_resolver, _resolver):
+            feature_api.add_handler(event, resolver.classify)
 
 
 def current_verbosity(context: EvaluationContext | None = None) -> str:
@@ -169,3 +207,11 @@ def current_verbosity(context: EvaluationContext | None = None) -> str:
     span - and eventually its OTel attributes - to a targeting rule goes here.
     """
     return _resolver.current(context)
+
+
+def telemetry_enabled(context: EvaluationContext | None = None) -> bool:
+    """Whether `otelEnabled` allows tracing at all; `True` unless explicitly off.
+
+    Cached and context-forwarded exactly like `current_verbosity()`.
+    """
+    return _enabled_resolver.current(context)

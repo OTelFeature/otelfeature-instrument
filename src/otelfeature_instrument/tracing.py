@@ -1,7 +1,8 @@
 """The verbosity-aware TracerProvider/Tracer.
 
 When verbosity is `IO`, spans of kind `INTERNAL` are never created and never
-attached to context - `start_span`/`start_as_current_span` just hand back
+attached to context; when it is `OFF` (or `otelEnabled` is false), no span of
+any kind is. Either way, `start_span`/`start_as_current_span` just hand back
 whatever span was already current. Anything created "under" a suppressed
 span therefore attaches directly to its real parent instead of to the
 suppressed span, so no orphaned parent references are produced.
@@ -12,6 +13,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -21,7 +23,12 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Link, Span, SpanKind, Tracer, TracerProvider
 from opentelemetry.util import types as otel_types
 
-from otelfeature_instrument.flags import VERBOSITY_IO, current_verbosity
+from otelfeature_instrument.flags import (
+    VERBOSITY_IO,
+    VERBOSITY_OFF,
+    current_verbosity,
+    telemetry_enabled,
+)
 
 
 class _VerbosityAwareTracer(Tracer):
@@ -30,7 +37,13 @@ class _VerbosityAwareTracer(Tracer):
 
     @staticmethod
     def _suppress(kind: SpanKind) -> bool:
-        return kind is SpanKind.INTERNAL and current_verbosity() == VERBOSITY_IO
+        # Traces only: metrics are not routed through here and keep flowing.
+        if not telemetry_enabled():
+            return True
+        verbosity = current_verbosity()
+        if verbosity == VERBOSITY_OFF:
+            return True
+        return kind is SpanKind.INTERNAL and verbosity == VERBOSITY_IO
 
     def start_span(
         self,
@@ -70,7 +83,17 @@ class _VerbosityAwareTracer(Tracer):
         end_on_exit: bool = True,
     ) -> Iterator[Span]:
         if self._suppress(kind):
-            yield trace.get_current_span(context)
+            if context is None:
+                yield trace.get_current_span()
+                return
+            # An explicit context is how server instrumentation hands over the
+            # extracted remote parent. Make it current, exactly as a real span
+            # would have, so children and outgoing propagation still see it.
+            token = otel_context.attach(context)
+            try:
+                yield trace.get_current_span(context)
+            finally:
+                otel_context.detach(token)
             return
         with self._wrapped.start_as_current_span(
             name,

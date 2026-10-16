@@ -26,9 +26,12 @@ from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
 from otelfeature_instrument import flags
 from otelfeature_instrument.flags import (
     _RECLASSIFY_ON,
+    OTEL_ENABLED_FLAG_KEY,
     TRACE_VERBOSITY_FLAG_KEY,
     VERBOSITY_FULL,
     VERBOSITY_IO,
+    VERBOSITY_OFF,
+    _EnabledResolver,
     _VerbosityResolver,
 )
 
@@ -76,6 +79,8 @@ class _RecordingClient:
         self.calls.append(context)
         index = min(len(self.calls) - 1, len(self._responses) - 1)
         return self._responses[index]
+
+    get_boolean_details = get_string_details
 
 
 # --------------------------------------------------------------------------
@@ -225,6 +230,79 @@ def test_removing_targeting_switches_caching_back_on():
 
 
 # --------------------------------------------------------------------------
+# telemetryLevel=OFF and otelEnabled
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["OFF", "off", " Off "])
+def test_off_variant_is_normalised(raw):
+    client = _RecordingClient(_details(raw, Reason.STATIC))
+    resolver = _VerbosityResolver()
+
+    with patch.object(feature_api, "get_client", return_value=client):
+        assert resolver.current() == VERBOSITY_OFF
+
+
+def _bool_details(value, reason: Reason) -> FlagEvaluationDetails:
+    return FlagEvaluationDetails(flag_key=OTEL_ENABLED_FLAG_KEY, value=value, reason=reason)
+
+
+def test_static_otel_enabled_false_is_cached():
+    """`False` is a real answer, not the "uncached" sentinel."""
+    client = _RecordingClient(_bool_details(False, Reason.STATIC))
+    resolver = _EnabledResolver()
+
+    with patch.object(feature_api, "get_client", return_value=client):
+        resolver.classify(EventDetails())
+        values = [resolver.current() for _ in range(5)]
+
+    assert values == [False] * 5
+    assert len(client.calls) == 1
+    assert resolver.cached is False
+
+
+def test_targeted_otel_enabled_is_evaluated_per_span_with_context():
+    client = _RecordingClient(_bool_details(False, Reason.TARGETING_MATCH))
+    resolver = _EnabledResolver()
+    context = EvaluationContext(attributes={"suppress": True})
+
+    with patch.object(feature_api, "get_client", return_value=client):
+        resolver.classify(EventDetails())
+        assert resolver.current(context) is False
+
+    assert resolver.cached is None
+    assert client.calls == [None, context]
+
+
+def test_otel_enabled_ignores_changes_to_other_flags():
+    client = _RecordingClient(_bool_details(True, Reason.STATIC))
+    resolver = _EnabledResolver()
+
+    with patch.object(feature_api, "get_client", return_value=client):
+        resolver.classify(EventDetails())
+        resolver.classify(EventDetails(flags_changed=[TRACE_VERBOSITY_FLAG_KEY]))
+
+    assert len(client.calls) == 1
+
+
+@pytest.mark.parametrize("value", [True, None])
+def test_otel_enabled_fails_open(value):
+    """Anything but an explicit `false` - including the SDK's error default - enables."""
+    client = _RecordingClient(_bool_details(value, Reason.ERROR))
+    resolver = _EnabledResolver()
+
+    with patch.object(feature_api, "get_client", return_value=client):
+        assert resolver.current() is True
+
+
+def test_otel_enabled_with_no_provider_is_enabled():
+    """No provider registered at all: the SDK's no-op provider serves our default."""
+    feature_api.clear_providers()
+    assert _EnabledResolver().current() is True
+    assert _VerbosityResolver().current() == VERBOSITY_FULL
+
+
+# --------------------------------------------------------------------------
 # End-to-end against a real flagd provider (FILE resolver)
 # --------------------------------------------------------------------------
 
@@ -367,8 +445,12 @@ def test_configure_registers_handlers_and_an_in_process_flagd_provider(
 
     flags.configure_feature_flags()
 
-    assert [event for event, _ in registered_handlers] == list(flags._RECLASSIFY_ON)
-    assert all(handler == flags._resolver.classify for _, handler in registered_handlers)
+    # Both flags re-classify on every event.
+    assert registered_handlers == [
+        (event, resolver.classify)
+        for event in flags._RECLASSIFY_ON
+        for resolver in (flags._enabled_resolver, flags._resolver)
+    ]
     # in-process, not rpc: it is what delivers the configuration-changed events
     # the classification depends on.
     assert providers == [("flagd", {"resolver_type": ResolverType.IN_PROCESS})]
@@ -385,7 +467,9 @@ def test_configure_with_provider_none_still_registers_handlers(
 
     flags.configure_feature_flags()
 
-    assert [event for event, _ in registered_handlers] == list(flags._RECLASSIFY_ON)
+    assert [event for event, _ in registered_handlers] == [
+        event for event in flags._RECLASSIFY_ON for _ in range(2)
+    ]
 
 
 def test_configure_rejects_an_unknown_provider(
@@ -408,4 +492,55 @@ def test_configure_twice_registers_handlers_once(
     flags.configure_feature_flags()
     flags.configure_feature_flags()
 
-    assert len(registered_handlers) == len(flags._RECLASSIFY_ON)
+    assert len(registered_handlers) == 2 * len(flags._RECLASSIFY_ON)
+
+
+def _with_otel_enabled(flag: dict) -> dict:
+    return {**STATIC_FLAGS, "flags": {**STATIC_FLAGS["flags"], OTEL_ENABLED_FLAG_KEY: flag}}
+
+
+def test_real_flagd_static_otel_enabled_false_is_cached(flag_file: Path, flagd_provider):
+    flag_file.write_text(
+        json.dumps(
+            _with_otel_enabled(
+                {
+                    "state": "ENABLED",
+                    "defaultVariant": "off",
+                    "variants": {"on": True, "off": False},
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+    resolver = _EnabledResolver()
+    feature_api.add_handler(ProviderEvent.PROVIDER_CONFIGURATION_CHANGED, resolver.classify)
+    try:
+        assert _wait_for(lambda: resolver.cached is False), "otelEnabled=false never cached"
+        assert resolver.current() is False
+    finally:
+        feature_api.remove_handler(
+            ProviderEvent.PROVIDER_CONFIGURATION_CHANGED, resolver.classify
+        )
+
+
+def test_real_flagd_non_boolean_otel_enabled_fails_open(flag_file: Path, flagd_provider):
+    """A string-valued `otelEnabled` is a type mismatch: the SDK serves our `True`."""
+    flag_file.write_text(
+        json.dumps(
+            _with_otel_enabled(
+                {
+                    "state": "ENABLED",
+                    "defaultVariant": "off",
+                    "variants": {"on": "true", "off": "false"},
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    def loaded() -> bool:
+        details = feature_api.get_client().get_boolean_details(OTEL_ENABLED_FLAG_KEY, True)
+        return details.error_code is not None and str(details.error_code) != "FLAG_NOT_FOUND"
+
+    assert _wait_for(loaded), "flagd never picked up the otelEnabled flag"
+    assert _EnabledResolver().current() is True
