@@ -121,10 +121,9 @@ not the same thing:
   the incoming parent (as a non-recording span with the same context) and
   keeps that parent current, so an incoming `traceparent` is still
   forwarded downstream and a trace resumes coherently the moment the flag
-  flips back. For an incident-response kill switch that is a feature. Two
-  consequences: while off, this service drops out of the trace (downstream
-  spans attach to its caller), and a request that arrived without a
-  `traceparent` propagates none.
+  flips back. For an incident-response kill switch that is a feature - but
+  it does leave gaps; see
+  [`OFF` leaves gaps in traces](#off-leaves-gaps-in-traces).
 - **Most of the CPU is saved too, in Python.** Suppression happens at span
   creation: no SDK span is created, recorded, processed or exported. (This
   differs from span-processor-based implementations, which still pay for
@@ -202,6 +201,33 @@ at - a missing one simply behaves as `FULL`/`true`. See
 for an example flag definition.
 
 ## Known limitations
+
+### `OFF` leaves gaps in traces
+
+`OFF` and `otelEnabled=false` are kept for completeness, but they are known
+to produce incomplete traces. While tracing is suppressed, the tracer hands
+back the span that is already current instead of creating one. What
+downstream services see depends on whether a request arrived with a parent:
+
+- **Request arrived with a `traceparent`:** the incoming context is still
+  forwarded. Downstream spans join the same trace but attach directly to
+  the upstream caller's span, so this service is a gap in the middle of
+  the trace.
+- **Request arrived without one** (this service is the entry point): there
+  is no current span, so no context is propagated. Every traced downstream
+  service starts its own root trace for each call, and one request shows up
+  as several unrelated traces.
+- **Flag flipped back on mid-request:** spans created after the flip
+  attach to whatever the suppressed span stood in for - the upstream caller,
+  or nothing. Without an incoming parent, every such span becomes its own
+  root trace.
+- **Flag flipped off mid-request:** spans already started finish and are
+  exported, but their children from after the flip are missing.
+
+In short: while `OFF`, this service's part of a trace is missing, and
+without an incoming parent the trace is also split downstream.
+
+### Other limitations
 
 - `bootstrap.py` reaches into `opentelemetry.instrumentation.auto_instrumentation._load`,
   a private module of `opentelemetry-instrumentation` - hence the exact
