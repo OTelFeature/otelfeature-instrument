@@ -23,12 +23,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Link, Span, SpanKind, Tracer, TracerProvider
 from opentelemetry.util import types as otel_types
 
-from otelfeature_instrument.flags import (
-    VERBOSITY_IO,
-    VERBOSITY_OFF,
-    current_verbosity,
-    telemetry_enabled,
-)
+from otelfeature_instrument.flags import current_policy
 
 
 def _stand_in(span: Span) -> Span:
@@ -46,12 +41,10 @@ class _VerbosityAwareTracer(Tracer):
     @staticmethod
     def _suppress(kind: SpanKind) -> bool:
         # Traces only: metrics are not routed through here and keep flowing.
-        if not telemetry_enabled():
+        policy = current_policy()
+        if not policy.enabled:
             return True
-        verbosity = current_verbosity()
-        if verbosity == VERBOSITY_OFF:
-            return True
-        return kind is SpanKind.INTERNAL and verbosity == VERBOSITY_IO
+        return kind is SpanKind.INTERNAL and policy.suppress_internal
 
     def start_span(
         self,

@@ -27,7 +27,9 @@ re-read live:
 `otelEnabled` is the plain on/off switch; `OFF` is the same thing for
 operators who already manage `telemetryLevel`. Both **fail open**: a missing
 flag, a provider error, an unknown `telemetryLevel` variant or a non-boolean
-`otelEnabled` all behave as `FULL`/`true`. Both cover **traces only** -
+`otelEnabled` all fall back to what the process would do without
+OTelFeature - `FULL`/`true` unless the environment says otherwise (see
+[One policy, one read](#one-policy-one-read)). Both cover **traces only** -
 metrics keep flowing either way, on purpose.
 
 Suppressed spans' children reattach to the real parent instead of being
@@ -143,6 +145,28 @@ background over a gRPC stream) and evaluated in memory - no network call on
 the per-span hot path. Editing the flag in flagd takes effect on the very
 next span, with no restart of the instrumented application.
 
+### One policy, one read
+
+Enforcement points never read a flag directly. `current_policy()` in
+[flags.py](src/otelfeature_instrument/flags.py) resolves every flag into one
+`TelemetryPolicy` value per decision point:
+
+| Field               | From                                          | Fallback                          |
+|---------------------|-----------------------------------------------|-----------------------------------|
+| `enabled`           | `otelEnabled` and `telemetryLevel != OFF`      | `OTEL_SDK_DISABLED` is not `true` |
+| `suppress_internal` | `telemetryLevel == IO`                        | `false`                           |
+
+**Every field falls back to its startup value**, resolved from the
+environment once when the process starts. With flagd unreachable or a flag
+undefined, behaviour is that of plain `opentelemetry-instrument`; flags are a
+live override, never a replacement. (`OTEL_SDK_DISABLED=true` disables the
+OpenTelemetry SDK itself, so a flag cannot turn tracing back on there - the
+fallback just keeps the policy consistent with it.)
+
+Provider errors and missing flags are logged once when they start - a missing
+flag at `INFO`, anything else at `WARNING` - and once when the flag becomes
+readable again, never per span.
+
 ### Evaluating once, or evaluating always
 
 `telemetryLevel` and `otelEnabled` are each asked about on every single span,
@@ -164,18 +188,19 @@ an evaluation context**, purely to read the reason back:
 - `STATIC` is kept. Every subsequent span is answered from memory,
   evaluating nothing and running no hooks.
 - So is an `ERROR` whose code is `FLAG_NOT_FOUND`: a deployment that never
-  defined the flag gets the fail-open default from memory instead of a
+  defined the flag gets the startup fallback from memory instead of a
   failing evaluation per span. Creating the flag later lists it in the
   configuration-changed event, which re-classifies.
 - Anything else means the value can depend on who's asking, so every span
   evaluates for itself.
 
-Each flag is classified independently. That classification is redone on every
-`PROVIDER_CONFIGURATION_CHANGED`, so attaching a `targeting` block to
-`telemetryLevel` (or `otelEnabled`) in flagd makes the next probe report
-`TARGETING_MATCH`, caching switches itself off for that flag, and spans start
-being evaluated individually. Remove the targeting and caching resumes by
-itself. No configuration, no restart, no code change here.
+Each flag is classified independently; while every flag is cached, so is
+the combined `TelemetryPolicy`, and a span costs one attribute read. That
+classification is redone on every `PROVIDER_CONFIGURATION_CHANGED`, so
+attaching a `targeting` block to `telemetryLevel` (or `otelEnabled`) in flagd
+makes the next probe report `TARGETING_MATCH`, caching switches itself off
+for that flag, and spans start being evaluated individually. Remove the
+targeting and caching resumes by itself. No configuration, no restart, no code change here.
 
 The event handler is what makes caching safe in the first place: flagd's
 in-process resolver pushes a changed ruleset over its gRPC sync stream, the
@@ -193,10 +218,11 @@ evaluation: the right answer, just not yet the cheap one.
 | `FLAGD_HOST`                  | `localhost`| flagd host                                                       |
 | `FLAGD_PORT`                  | `8015`     | flagd gRPC sync port (in-process resolver)                       |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
+| `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; also the fallback for `TelemetryPolicy.enabled` |
 
 The `telemetryLevel` (variants `FULL`/`IO`/`OFF`) and `otelEnabled` (boolean)
 flags should exist in whatever flagd instance `FLAGD_HOST`/`FLAGD_PORT` point
-at - a missing one simply behaves as `FULL`/`true`. See
+at - a missing one simply falls back to its startup value. See
 [poc-otelfeature/src/flagd](https://github.com/OTelFeature/poc/tree/main/src/flagd)
 for an example flag definition.
 
