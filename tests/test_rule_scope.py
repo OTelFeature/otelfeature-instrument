@@ -309,3 +309,43 @@ def test_ambient_context_sources_keep_evaluation_per_span(flagd, level_evaluatio
 def test_flagds_own_sync_metadata_hook_is_not_ambient(flagd):
     flagd(_ruleset())
     assert rule_scope.ambient_context_is_fixed() is True
+
+
+def test_a_record_span_scope_rule_is_decided_once_per_tracer(flagd, monkeypatch):
+    """Demo 2's JDBC drop: per tracer, children attach to the kept ancestor."""
+    flagd(
+        {
+            "flags": {
+                flags.RECORD_SPAN_FLAG_KEY: {
+                    "state": "ENABLED",
+                    "defaultVariant": "on",
+                    "variants": {"on": True, "off": False},
+                    "targeting": {
+                        "if": [_eq("otel.scope.name", "opentelemetry.instrumentation.jdbc"), "off", None]
+                    },
+                }
+            }
+        }
+    )
+    evaluations = []
+    original = flags._RecordSpanResolver._read
+
+    def counting(self, client, context):
+        evaluations.append(context)
+        return original(self, client, context)
+
+    monkeypatch.setattr(flags._RecordSpanResolver, "_read", counting)
+    exporter = InMemorySpanExporter()
+    provider = _provider(exporter)
+    app, jdbc = provider.get_tracer("app"), provider.get_tracer("opentelemetry.instrumentation.jdbc")
+
+    for _ in range(20):
+        with app.start_as_current_span("GET /weather", kind=trace.SpanKind.SERVER):
+            with jdbc.start_as_current_span("SELECT", kind=trace.SpanKind.CLIENT):
+                app.start_span("row mapping").end()
+
+    spans = exporter.get_finished_spans()
+    assert {s.name for s in spans} == {"GET /weather", "row mapping"}
+    assert len(spans) == 40
+    # app: roots and children; jdbc: children - once each, not per span.
+    assert len(evaluations) == 3
