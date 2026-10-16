@@ -20,7 +20,9 @@ from otelfeature_instrument.flags import SAMPLE_RATIO_FLAG_KEY, TelemetryPolicy,
 from otelfeature_instrument.sampling import flag_aware_sampler
 from otelfeature_instrument.tracing import _VerbosityAwareTracerProvider
 
-DECISION_KEYS = {"feature_flag.key", "feature_flag.result.variant", "otelfeature.sample_ratio"}
+DECISION_KEYS = {"otelfeature.sample_ratio"}
+# Recording flag evaluations is the OpenFeature OpenTelemetry hook's job.
+FLAG_KEYS = {"feature_flag.key", "feature_flag.result.variant"}
 
 
 @pytest.fixture
@@ -62,8 +64,7 @@ def test_a_sampled_root_after_a_ratio_of_a_tenth_carries_the_decision(flagd):
 
     assert roots, "nothing sampled at all"
     for root in roots:
-        assert root.attributes["feature_flag.key"] == SAMPLE_RATIO_FLAG_KEY
-        assert root.attributes["feature_flag.result.variant"] == "tenth"
+        assert FLAG_KEYS.isdisjoint(root.attributes)
         assert root.attributes["otelfeature.sample_ratio"] == 0.1
         assert root.attributes["url.path"] == "/"  # start attributes kept
 
@@ -95,7 +96,7 @@ def test_nothing_is_recorded_at_defaults(flagd, flag, startup_ratio):
     assert all(DECISION_KEYS.isdisjoint(span.attributes) for span in spans)
 
 
-def test_a_targeted_ratio_records_the_variant_that_decided(flagd):
+def test_a_targeted_ratio_records_the_ratio_that_applied(flagd):
     flagd(
         {
             "defaultVariant": "low",
@@ -105,14 +106,9 @@ def test_a_targeted_ratio_records_the_variant_that_decided(flagd):
     )
 
     roots = [s for s in _traced(400) if s.parent is None]
-    variants = {root.attributes["feature_flag.result.variant"] for root in roots}
-    ratios = {
-        root.attributes["feature_flag.result.variant"]: root.attributes["otelfeature.sample_ratio"]
-        for root in roots
-    }
+    ratios = {root.attributes["otelfeature.sample_ratio"] for root in roots}
 
-    assert variants == {"low", "high"}
-    assert ratios == {"low": 0.2, "high": 0.9}
+    assert ratios == {0.2, 0.9}
 
 
 def test_the_static_path_builds_the_attributes_once(flagd):
@@ -126,10 +122,10 @@ def test_the_static_path_builds_the_attributes_once(flagd):
 
 
 def test_the_shared_attributes_are_read_only():
-    policy = _PolicySource()._combine(True, "FULL", (0.25, True, "quarter"))
+    policy = _PolicySource()._combine(True, "FULL", (0.25, True))
 
     with pytest.raises(TypeError):
-        policy.decision_attributes["feature_flag.key"] = "tampered"
+        policy.decision_attributes["otelfeature.sample_ratio"] = 1.0
 
 
 class _NoVariantClient:
@@ -156,9 +152,7 @@ def test_a_provider_without_variants_still_records_the_decision(monkeypatch):
 
     assert roots
     for root in roots:
-        assert root.attributes["feature_flag.key"] == SAMPLE_RATIO_FLAG_KEY
         assert root.attributes["otelfeature.sample_ratio"] == 0.5
-        assert "feature_flag.result.variant" not in root.attributes
 
 
 @pytest.mark.parametrize(
@@ -190,3 +184,67 @@ def test_the_applications_own_attributes_win(flagd):
     (root,) = exporter.get_finished_spans()
     assert root.attributes["feature_flag.key"] == "appFlag"
     assert root.attributes["otelfeature.sample_ratio"] == 1.0
+
+
+
+# --------------------------------------------------------------------------
+# The OpenFeature OpenTelemetry hook: opt-in, for the extension's evaluations
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def hook_options():
+    yield
+    flags.enable_tracing_hook({})  # back to off
+
+
+@pytest.mark.parametrize("value", [None, "", "false", "1"])
+def test_the_tracing_hook_is_off_by_default(hook_options, value):
+    environ = {} if value is None else {flags.TRACING_HOOK_ENV_VAR: value}
+    assert flags.enable_tracing_hook(environ) is False
+    assert flags._hook_options == ()
+
+
+def test_the_tracing_hook_records_the_extensions_evaluations_when_opted_in(
+    flagd, hook_options
+):
+    pytest.importorskip("openfeature.contrib.hook.opentelemetry")
+    assert flags.enable_tracing_hook({flags.TRACING_HOOK_ENV_VAR: "true"}) is True
+    flagd(
+        {
+            "defaultVariant": "all",
+            "variants": {"none": 0.0, "all": 1.0},
+            "targeting": {"if": [{"==": [{"var": "url.path"}, "/never"]}, "none", "all"]},
+        }
+    )
+    exporter = InMemorySpanExporter()
+    provider = SDKTracerProvider(resource=Resource.create(), sampler=flag_aware_sampler({}))
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = _VerbosityAwareTracerProvider(provider).get_tracer("t")
+
+    with tracer.start_as_current_span("request", kind=trace.SpanKind.SERVER):
+        # A second root started inside `request`: its ratio is evaluated
+        # while `request` is the current span.
+        tracer.start_span("inner-root", context=trace.set_span_in_context(trace.INVALID_SPAN)).end()
+
+    request = next(s for s in exporter.get_finished_spans() if s.name == "request")
+    events = [e for e in request.events if e.name == "feature_flag.evaluation"]
+    # The event lands on the span that is current while the flag is
+    # evaluated - the parent, since the new span doesn't exist yet.
+    assert [e.attributes["feature_flag.key"] for e in events] == [SAMPLE_RATIO_FLAG_KEY]
+
+
+def test_without_the_package_opting_in_warns_and_stays_off(hook_options, monkeypatch, caplog):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_hook_package(name, *args, **kwargs):
+        if name == "openfeature.contrib.hook.opentelemetry":
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_hook_package)
+
+    assert flags.enable_tracing_hook({flags.TRACING_HOOK_ENV_VAR: "true"}) is False
+    assert "openfeature-hooks-opentelemetry is not installed" in caplog.text

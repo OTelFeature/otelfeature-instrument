@@ -327,25 +327,33 @@ and tooling as every other flag. (OpenTelemetry Python ships no
 `jaeger_remote` sampler, and `otelfeature-instrument` doesn't load sampler
 entry points; the comparison is with the other SDKs and the Collector.)
 
-### Recording the decision on spans
+### Recording the applied ratio on spans
 
 A root span kept under a **non-default** `traceSampleRatio` - the flag set a
-ratio other than the startup value - records which flag decided and the
-ratio it applied, so a backend can re-weight counts (a span kept at `0.1`
-stands for ten):
+ratio other than the startup value - records the ratio it applied as
+`otelfeature.sample_ratio`, so a backend can re-weight counts (a span kept
+at `0.1` stands for ten). Root spans only (children inherit their root's
+decision), and nothing is added when everything is at defaults: no flag,
+the flag at the startup value, or a flag that couldn't be read. On the
+static path the attribute is built once per cached policy, not per span.
+The span's own start attributes win on a clash.
 
-| Attribute                     | Value                                   |
-|-------------------------------|-----------------------------------------|
-| `feature_flag.key`            | `traceSampleRatio`                      |
-| `feature_flag.result.variant` | the variant that decided, e.g. `tenth` (only when the provider reports variants) |
-| `otelfeature.sample_ratio`    | the applied ratio, e.g. `0.1`           |
+### Flag evaluations as span events (opt-in)
 
-Root spans only (children inherit their root's decision), and nothing is
-added when everything is at defaults: no flag, the flag at the startup
-value, or a flag that couldn't be read. On the static path the attributes
-are built once per cached policy, not per span. The span's own start
-attributes are kept alongside, and win on a clash: an application's own
-`feature_flag.key` on its root span is not overwritten.
+*Which* flag evaluated to *what* is not recorded by the extension: that is
+the job of the [OpenFeature OpenTelemetry hook](https://github.com/open-feature/python-sdk-contrib/tree/main/hooks/openfeature-hooks-opentelemetry),
+registered by whoever wants it - typically the application, for its own
+flags.
+
+For the extension's own evaluations it can be switched on with
+`OTELFEATURE_OPENFEATURE_TRACING_HOOK=true` (install
+`otelfeature-instrument[tracing-hook]`). It is **off by default on
+purpose**: static flags are not evaluated at all, but a flag with
+targeting is evaluated per span (per root for `traceSampleRatio`), and
+each evaluation adds a `feature_flag.evaluation` event - to the span that
+is current at that moment, i.e. the *parent* of the span being decided.
+That is one event per span on a busy service: exactly the noise this
+project removes. Use it to debug a rule, not permanently.
 
 ### The evaluation context
 
@@ -479,6 +487,7 @@ can close the loop on its own - no outside script, no new metric:
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | flagd key of the selective-drop flag |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
+| `OTELFEATURE_OPENFEATURE_TRACING_HOOK` | `false` | `true` records the extension's own flag evaluations as span events (needs the `tracing-hook` extra; adds an event per targeted evaluation) |
 | `OTEL_METRICS_EXPORTER`       | `otlp`     | `none` installs no meter provider at all - and so no error rate. Only `none` is recognised; any other value still exports via OTLP/HTTP |
 | `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections (see [Error rate](#error-rate-in-the-context)) |
 | `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10` | Minimum requests per interval before an error rate is published |

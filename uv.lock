@@ -548,6 +548,20 @@ wheels = [
 ]
 
 [[package]]
+name = "openfeature-hooks-opentelemetry"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "openfeature-sdk" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-semantic-conventions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4a/3c/2841238b88d4ddd28e7cab23c14d3c44723a007d4b82c44f7349ab352d05/openfeature_hooks_opentelemetry-0.3.1.tar.gz", hash = "sha256:6d399244a6f5408f474ae2b0233257e30d8a041d635f71c2727c033dbfe1fe92", size = 6719, upload-time = "2026-02-17T16:56:22.372Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/87/42/6d0b50f261ffaac3db7626673a3edeb18cacf2202c804337a58d8db86a94/openfeature_hooks_opentelemetry-0.3.1-py3-none-any.whl", hash = "sha256:ef4cddec8d328a9b6b738494de3aed623a9917d3b83b2e6b0377e4d2a21d3b22", size = 8072, upload-time = "2026-02-17T16:56:21.347Z" },
+]
+
+[[package]]
 name = "openfeature-provider-flagd"
 version = "0.5.2"
 source = { registry = "https://pypi.org/simple" }
@@ -713,13 +727,20 @@ dependencies = [
     { name = "opentelemetry-sdk" },
 ]
 
+[package.optional-dependencies]
+tracing-hook = [
+    { name = "openfeature-hooks-opentelemetry" },
+]
+
 [package.dev-dependencies]
 dev = [
+    { name = "openfeature-hooks-opentelemetry" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "openfeature-hooks-opentelemetry", marker = "extra == 'tracing-hook'", specifier = "==0.3.1" },
     { name = "openfeature-provider-flagd", specifier = "==0.5.2" },
     { name = "openfeature-sdk", specifier = "==0.10.0" },
     { name = "opentelemetry-api", specifier = "==1.45.1" },
@@ -727,9 +748,13 @@ requires-dist = [
     { name = "opentelemetry-instrumentation", specifier = "==0.66b1" },
     { name = "opentelemetry-sdk", specifier = "==1.45.1" },
 ]
+provides-extras = ["tracing-hook"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = "==9.1.1" }]
+dev = [
+    { name = "openfeature-hooks-opentelemetry", specifier = "==0.3.1" },
+    { name = "pytest", specifier = "==9.1.1" },
+]
 
 [[package]]
 name = "packaging"

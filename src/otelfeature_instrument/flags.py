@@ -41,7 +41,7 @@ from openfeature.contrib.provider.flagd.config import ResolverType
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import EventDetails, ProviderEvent
 from openfeature.exception import ErrorCode
-from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
+from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOptions, Reason
 
 _logger = getLogger(__name__)
 
@@ -106,28 +106,21 @@ class TelemetryPolicy:
     # Probability that a new trace is sampled. From `traceSampleRatio`.
     sample_ratio: float = 1.0
     # Whether `sample_ratio` is a non-default decision: the flag was read and
-    # set a ratio other than the startup value. Only then is anything
-    # recorded on spans.
+    # set a ratio other than the startup value. Only then is it recorded on
+    # spans.
     sample_ratio_decided: bool = False
-    # The variant behind that decision, when the provider reports one
-    # (variants are optional in OpenFeature).
-    sample_ratio_variant: str | None = None
 
     @cached_property
     def decision_attributes(self) -> Mapping[str, Any] | None:
-        """Attributes recorded on a kept root span, so a backend can tell which
-        flag decided and re-weight counts by the ratio. Built once per policy
-        object, so a cached policy never builds them again; read-only, since
-        every root on the static path shares them."""
+        """Attributes recorded on a kept root span, so a backend can re-weight
+        counts by the applied ratio. Which flag evaluated to what is not
+        recorded here - that is the OpenFeature OpenTelemetry hook's job (see
+        `tracing_hook_options`). Built once per policy object, so a cached
+        policy never builds them again; read-only, since every root on the
+        static path shares them."""
         if not self.sample_ratio_decided:
             return None
-        attributes: dict[str, Any] = {
-            "feature_flag.key": SAMPLE_RATIO_FLAG_KEY,
-            "otelfeature.sample_ratio": self.sample_ratio,
-        }
-        if self.sample_ratio_variant is not None:
-            attributes["feature_flag.result.variant"] = self.sample_ratio_variant
-        return MappingProxyType(attributes)
+        return MappingProxyType({"otelfeature.sample_ratio": self.sample_ratio})
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] = os.environ) -> TelemetryPolicy:
@@ -167,6 +160,42 @@ _RECLASSIFY_ON = (
     ProviderEvent.PROVIDER_ERROR,
     ProviderEvent.PROVIDER_STALE,
 )
+
+
+TRACING_HOOK_ENV_VAR = "OTELFEATURE_OPENFEATURE_TRACING_HOOK"
+
+# Extra arguments for every evaluation the extension makes: empty, or the
+# FlagEvaluationOptions carrying the OpenFeature OpenTelemetry hook when
+# opted into - see `enable_tracing_hook`.
+_hook_options: tuple = ()
+
+
+def enable_tracing_hook(environ: Mapping[str, str] = os.environ) -> bool:
+    """Attach the OpenFeature OpenTelemetry `TracingHook` to the extension's
+    own evaluations, if OTELFEATURE_OPENFEATURE_TRACING_HOOK=true.
+
+    Off by default, on purpose: with targeted flags the extension evaluates
+    per span, so the hook adds a `feature_flag.evaluation` event per span -
+    exactly the kind of noise this project exists to remove. Recording the
+    application's own flag evaluations is the application's business (it
+    registers the hook itself); this only covers the extension's.
+    """
+    global _hook_options
+    if environ.get(TRACING_HOOK_ENV_VAR, "").strip().lower() != "true":
+        _hook_options = ()
+        return False
+    try:
+        from openfeature.contrib.hook.opentelemetry import TracingHook  # noqa: PLC0415
+    except ImportError:
+        _logger.warning(
+            "otelfeature-instrument: %s=true, but openfeature-hooks-opentelemetry is "
+            "not installed (pip install 'otelfeature-instrument[tracing-hook]')",
+            TRACING_HOOK_ENV_VAR,
+        )
+        _hook_options = ()
+        return False
+    _hook_options = (FlagEvaluationOptions(hooks=[TracingHook()]),)
+    return True
 
 
 class _CachingResolver:
@@ -311,7 +340,7 @@ class _VerbosityResolver(_CachingResolver):
         self._reported_unknown: str | None = None
 
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
-        return client.get_string_details(self.flag_key, self.default, context)
+        return client.get_string_details(self.flag_key, self.default, context, *_hook_options)
 
     def _normalise(self, value) -> str:
         level = (value or self.default).strip().upper()
@@ -345,14 +374,13 @@ class _SampleRatioResolver(_CachingResolver):
         self._reported_invalid: object = None
 
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
-        return client.get_float_details(self.flag_key, self.default, context)
+        return client.get_float_details(self.flag_key, self.default, context, *_hook_options)
 
-    def _answer(self, details: FlagEvaluationDetails) -> tuple[float, bool, str | None]:
-        # `(ratio, read, variant)`: whether the flag was actually read travels
-        # with the ratio, so a kept root can record a decision the flag made -
-        # and never one the startup fallback made.
-        read = details.error_code is None
-        return self._normalise(details.value), read, details.variant if read else None
+    def _answer(self, details: FlagEvaluationDetails) -> tuple[float, bool]:
+        # `(ratio, read)`: whether the flag was actually read travels with the
+        # ratio, so a kept root records a decision the flag made - and never
+        # one the startup fallback made.
+        return self._normalise(details.value), details.error_code is None
 
     def _normalise(self, value) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
@@ -383,7 +411,7 @@ class _EnabledResolver(_CachingResolver):
     def _read(self, client, context: EvaluationContext | None) -> FlagEvaluationDetails:
         # A missing flag, a provider error or a non-boolean variant all come
         # back from the SDK as `self.default` (reason ERROR).
-        return client.get_boolean_details(self.flag_key, self.default, context)
+        return client.get_boolean_details(self.flag_key, self.default, context, *_hook_options)
 
     def _normalise(self, value) -> bool:
         return self.default if value is None else bool(value)
@@ -406,7 +434,7 @@ class _PolicySource:
         )
         self.record = _RecordSpanResolver(self.defaults.record_span)
         self.ratio = _SampleRatioResolver(self.defaults.sample_ratio)
-        self._default_ratio = (self.defaults.sample_ratio, False, None)
+        self._default_ratio = (self.defaults.sample_ratio, False)
         # Same contract as `_CachingResolver._cached`: set only while every
         # input flag is cached, so the static path stays one attribute read
         # and allocates nothing.
@@ -484,7 +512,7 @@ class _PolicySource:
         self,
         enabled: bool,
         level: str,
-        ratio: tuple[float, bool, str | None],
+        ratio: tuple[float, bool],
         record: bool = True,
     ) -> TelemetryPolicy:
         # Precedence: OTEL_SDK_DISABLED (the floor, see __init__) >
@@ -498,7 +526,7 @@ class _PolicySource:
         suppress_internal = {VERBOSITY_FULL: False, VERBOSITY_IO: True}.get(
             level, self.defaults.suppress_internal
         )
-        value, read, variant = ratio
+        value, read = ratio
         # A decision is only worth recording when the flag moved the ratio
         # away from what the process would do anyway.
         decided = read and value != self.defaults.sample_ratio
@@ -508,7 +536,6 @@ class _PolicySource:
             record_span=record,
             sample_ratio=value,
             sample_ratio_decided=decided,
-            sample_ratio_variant=variant if decided else None,
         )
 
 
@@ -519,6 +546,7 @@ _handlers_registered = False
 
 
 def configure_feature_flags() -> None:
+    enable_tracing_hook()
     provider = os.environ.get(FLAG_PROVIDER_ENV_VAR, FLAG_PROVIDER_FLAGD).strip().lower()
     if provider == FLAG_PROVIDER_NONE:
         # Still worth listening: the application may register its own provider
