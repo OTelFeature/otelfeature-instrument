@@ -72,9 +72,10 @@ RECORD_SPAN_FLAG_KEY = record_span_flag_key()
 # new trace is sampled, applied at the root and inherited downstream.
 SAMPLE_RATIO_FLAG_KEY = "traceSampleRatio"
 
-# OTEL_TRACES_SAMPLER values whose behaviour is a ratio - see
-# `TelemetryPolicy.from_environment`. Anything else (a custom or
-# jaeger_remote sampler) is left in charge and the flag does not apply.
+# The SDK's built-in OTEL_TRACES_SAMPLER values, as the ratio each amounts to
+# (`None`: read OTEL_TRACES_SAMPLER_ARG) - the fallback for `sample_ratio`.
+# Anything else is unknown to the SDK too, which then falls back to
+# parentbased_always_on, i.e. 1.0.
 RATIO_SAMPLERS = {
     "always_on": 1.0,
     "parentbased_always_on": 1.0,
@@ -117,7 +118,9 @@ class TelemetryPolicy:
 
 
 def _ratio_from_environment(environ: Mapping[str, str]) -> float:
-    sampler = environ.get("OTEL_TRACES_SAMPLER", "parentbased_always_on").strip().lower()
+    # No strip(): the SDK doesn't either, and " always_off" must mean here
+    # what it means there.
+    sampler = environ.get("OTEL_TRACES_SAMPLER", "parentbased_always_on").lower()
     if sampler not in RATIO_SAMPLERS:
         return 1.0
     fixed = RATIO_SAMPLERS[sampler]
@@ -325,10 +328,11 @@ class _SampleRatioResolver(_CachingResolver):
         return min(1.0, max(0.0, float(value)))
 
     def _warn_once(self, value, problem: str) -> None:
-        # Once per offending value; a benign race may log it twice.
-        if value == self._reported_invalid:
+        # Once per offending value; a benign race may log it twice. Compared
+        # by repr() because NaN never equals itself.
+        if repr(value) == self._reported_invalid:
             return
-        self._reported_invalid = value
+        self._reported_invalid = repr(value)
         _logger.warning("otelfeature-instrument: %s=%r %s", self.flag_key, value, problem)
 
 
@@ -370,6 +374,13 @@ class _PolicySource:
         # input flag is cached, so the static path stays one attribute read
         # and allocates nothing.
         self._cached: TelemetryPolicy | None = None
+        # The same for spans that have a parent. `sample_ratio` only matters
+        # at a root (children follow their parent's decision), so a targeted
+        # `traceSampleRatio` must not cost every child span an evaluation:
+        # this one is set as soon as `otelEnabled`, `telemetryLevel` and
+        # `recordSpan` are cached, and carries the startup ratio, which
+        # nothing reads.
+        self._cached_child: TelemetryPolicy | None = None
         self._classify_lock = threading.Lock()
         # Disabled is disabled: nothing else in the policy matters then.
         self._disabled = TelemetryPolicy(
@@ -381,11 +392,15 @@ class _PolicySource:
         # telemetry, they never enable what the environment turned off.
         self._floor = not self.defaults.enabled
         if self._floor:
-            self._cached = self._disabled
+            self._cached = self._cached_child = self._disabled
 
     @property
     def cached(self) -> TelemetryPolicy | None:
         return self._cached
+
+    @property
+    def cached_child(self) -> TelemetryPolicy | None:
+        return self._cached_child
 
     def classify(self, details: EventDetails | None = None) -> None:
         """Registered as an OpenFeature event handler - see `_RECLASSIFY_ON`.
@@ -402,14 +417,22 @@ class _PolicySource:
             self.ratio.classify(details)
             enabled, level = self.enabled.cached, self.level.cached
             record, ratio = self.record.cached, self.ratio.cached
+            if enabled is None or level is None or record is None:
+                self._cached = self._cached_child = None
+                return
+            self._cached_child = self._combine(
+                enabled, level, self.defaults.sample_ratio, record
+            )
             self._cached = (
-                None
-                if enabled is None or level is None or record is None or ratio is None
-                else self._combine(enabled, level, ratio, record)
+                None if ratio is None else self._combine(enabled, level, ratio, record)
             )
 
-    def current(self, context: EvaluationContext | None = None) -> TelemetryPolicy:
-        cached = self._cached
+    def current(
+        self, context: EvaluationContext | None = None, *, root: bool = True
+    ) -> TelemetryPolicy:
+        """`root=False` for a span with a parent: `sample_ratio` is then not
+        evaluated (and holds the startup value), since nothing reads it."""
+        cached = self._cached if root else self._cached_child
         if cached is not None:
             return cached
         enabled = self.enabled.current(context)
@@ -419,9 +442,8 @@ class _PolicySource:
         level = self.level.current(context)
         if level == VERBOSITY_OFF:
             return self._disabled
-        return self._combine(
-            enabled, level, self.ratio.current(context), self.record.current(context)
-        )
+        ratio = self.ratio.current(context) if root else self.defaults.sample_ratio
+        return self._combine(enabled, level, ratio, self.record.current(context))
 
     def _combine(
         self, enabled: bool, level: str, ratio: float, record: bool = True
@@ -487,20 +509,23 @@ def _register_event_handlers() -> None:
         feature_api.add_handler(event, _policy_source.classify)
 
 
-def cached_policy() -> TelemetryPolicy | None:
-    """The policy while every flag is static, else `None`.
+def cached_policy(*, root: bool = True) -> TelemetryPolicy | None:
+    """The policy while every flag it needs is static, else `None`.
 
     Lets a caller skip building an evaluation context it would not need: on
     the static path nothing is evaluated, so nothing has to be described.
+    `root=False` (a span with a parent) doesn't need `traceSampleRatio`.
     """
-    return _policy_source.cached
+    return _policy_source.cached if root else _policy_source.cached_child
 
 
-def current_policy(context: EvaluationContext | None = None) -> TelemetryPolicy:
+def current_policy(
+    context: EvaluationContext | None = None, *, root: bool = True
+) -> TelemetryPolicy:
     """The current policy, evaluating only the flags that aren't static.
 
     `context` is forwarded to the provider for every flag that carries
     targeting, and ignored on the static path (where there is nothing to
-    evaluate).
+    evaluate). With `root=False`, `traceSampleRatio` is not evaluated.
     """
-    return _policy_source.current(context)
+    return _policy_source.current(context, root=root)

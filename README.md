@@ -279,11 +279,17 @@ to 100% for this service for ten minutes" needs it live, so
 - **`0.0` is `always_off`**, `1.0` is `always_on` - no separate flag needed.
 - **Never throws on the hot path.** Out of range is clamped; a non-numeric
   or NaN value falls back to the startup value (logged once).
-- **Startup fallback** is whatever `OTEL_TRACES_SAMPLER`/`_ARG` say, parsed
-  as the SDK parses them. The flag sampler takes over from the built-in
-  `always_*`, `traceidratio` and `parentbased_*` samplers (and always
-  behaves parent-based); a custom or `jaeger_remote` sampler is left in
-  charge, and `traceSampleRatio` then does not apply (logged at startup).
+- **Startup fallback** is the ratio `OTEL_TRACES_SAMPLER`/`_ARG` amount to,
+  parsed as the SDK parses them (`always_off` is `0.0`, `traceidratio` its
+  argument, anything else `1.0`). The sampler itself is always
+  parent-based: with a non-parent-based `always_on`, `always_off` or
+  `traceidratio`, a span with a sampled parent is sampled whatever the
+  ratio - logged as a warning at startup. Custom samplers (entry points such
+  as `jaeger_remote`) are not loaded by `otelfeature-instrument` - an
+  unknown name falls back to `1.0`, as the plain SDK provider would.
+- **Only roots evaluate it.** A span with a parent never asks
+  `traceSampleRatio`, so targeting on the ratio costs one evaluation per
+  trace in each service, not one per span.
 - **Targetable** with the [evaluation context](#the-evaluation-context): a
   ratio per `service.name` or `deployment.environment.name`, or a
   `fractional` rollout on `targetingKey` - the trace id, so a trace lands in
@@ -303,8 +309,9 @@ right choice if you run that infrastructure. `traceSampleRatio` reuses the
 flag infrastructure (flagd, OpenFeature) the organisation already operates
 for everything else, and gets OpenFeature targeting with it: ratios by any
 key in the evaluation context, percentage rollouts, and the same audit trail
-and tooling as every other flag. The two don't combine - with
-`OTEL_TRACES_SAMPLER=jaeger_remote` the flag sampler stays out of the way.
+and tooling as every other flag. (OpenTelemetry Python ships no
+`jaeger_remote` sampler, and `otelfeature-instrument` doesn't load sampler
+entry points; the comparison is with the other SDKs and the Collector.)
 
 ### The evaluation context
 
@@ -381,7 +388,7 @@ flag while it is being used, not left on permanently.
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | flagd key of the selective-drop flag |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
-| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback for `traceSampleRatio`; a non-ratio sampler (custom, `jaeger_remote`) disables the flag sampler |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback ratio for `traceSampleRatio`; the sampler is always parent-based and custom samplers are not loaded |
 
 The `telemetryLevel` (variants `FULL`/`IO`/`OFF`) and `otelEnabled` (boolean)
 flags should exist in whatever flagd instance `FLAGD_HOST`/`FLAGD_PORT` point

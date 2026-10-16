@@ -82,19 +82,28 @@ class _FlagRatioSampler(Sampler):
         return "FlagRatioSampler{traceSampleRatio}"
 
 
-def flag_aware_sampler(environ: Mapping[str, str] = os.environ) -> Sampler | None:
-    """The sampler to install, or `None` to leave OTEL_TRACES_SAMPLER in charge.
+def flag_aware_sampler(environ: Mapping[str, str] = os.environ) -> Sampler:
+    """The sampler `install_tracer_provider` installs - always parent-based.
 
-    Takes over whenever the configured sampler is one of the SDK's built-in
-    ratio-shaped ones (or none is configured); its ratio becomes the flag's
-    fallback. A custom or `jaeger_remote` sampler is left alone.
+    OTEL_TRACES_SAMPLER only supplies the fallback ratio (see
+    `TelemetryPolicy.from_environment`). Where the configured sampler would
+    have behaved differently - not parent-based, or not a built-in at all -
+    that is logged once, here, at startup.
     """
-    configured = environ.get("OTEL_TRACES_SAMPLER", "parentbased_always_on").strip().lower()
+    configured = environ.get("OTEL_TRACES_SAMPLER", "parentbased_always_on").lower()
     if configured not in RATIO_SAMPLERS:
-        _logger.info(
-            "otelfeature-instrument: OTEL_TRACES_SAMPLER=%s is not a ratio sampler - "
-            "traceSampleRatio does not apply",
+        # The plain SDK provider never loads sampler entry points either: an
+        # unknown name already meant parentbased_always_on before.
+        _logger.warning(
+            "otelfeature-instrument: OTEL_TRACES_SAMPLER=%r is not a built-in "
+            "sampler and custom samplers are not loaded - sampling with "
+            "traceSampleRatio, falling back to 1.0",
             configured,
         )
-        return None
+    elif not configured.startswith("parentbased_"):
+        _logger.warning(
+            "otelfeature-instrument: OTEL_TRACES_SAMPLER=%s is applied parent-based - "
+            "a span with a sampled parent is sampled whatever the ratio",
+            configured,
+        )
     return ParentBased(root=_FlagRatioSampler())

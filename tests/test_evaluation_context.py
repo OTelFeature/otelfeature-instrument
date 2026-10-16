@@ -103,11 +103,11 @@ def _tracer(exporter=None):
 def seen_contexts(monkeypatch):
     seen: list[EvaluationContext] = []
 
-    def spy(context=None):
+    def spy(context=None, **_):
         seen.append(context)
         return TelemetryPolicy()
 
-    monkeypatch.setattr(tracing, "cached_policy", lambda: None)
+    monkeypatch.setattr(tracing, "cached_policy", lambda **_: None)
     monkeypatch.setattr(tracing, "current_policy", spy)
     return seen
 
@@ -150,11 +150,11 @@ def test_a_suppressed_root_does_not_leak_its_preset_trace_id(monkeypatch):
     decisions = iter([TelemetryPolicy(enabled=False), TelemetryPolicy()])
     keys: list[str] = []
 
-    def policy(context=None):
+    def policy(context=None, **_):
         keys.append(context.targeting_key)
         return next(decisions)
 
-    monkeypatch.setattr(tracing, "cached_policy", lambda: None)
+    monkeypatch.setattr(tracing, "cached_policy", lambda **_: None)
     monkeypatch.setattr(tracing, "current_policy", policy)
     exporter = InMemorySpanExporter()
     tracer = _tracer(exporter)
@@ -167,12 +167,12 @@ def test_a_suppressed_root_does_not_leak_its_preset_trace_id(monkeypatch):
 
 
 def test_static_path_builds_no_context(monkeypatch):
-    monkeypatch.setattr(tracing, "cached_policy", lambda: TelemetryPolicy())
+    monkeypatch.setattr(tracing, "cached_policy", lambda **_: TelemetryPolicy())
     monkeypatch.setattr(
         tracing, "span_context", lambda **_: pytest.fail("built a context on the static path")
     )
     monkeypatch.setattr(
-        tracing, "current_policy", lambda *_: pytest.fail("evaluated on the static path")
+        tracing, "current_policy", lambda *_, **__: pytest.fail("evaluated on the static path")
     )
     exporter = InMemorySpanExporter()
     tracer = _tracer(exporter)
@@ -295,12 +295,12 @@ def test_a_span_started_during_evaluation_does_not_take_the_roots_trace_id(monke
     sneaky = provider.get_tracer("hook")  # straight on the SDK, during evaluation
     keys: list[str] = []
 
-    def policy(context=None):
+    def policy(context=None, **_):
         keys.append(context.targeting_key)
         sneaky.start_span("during-evaluation").end()
         return TelemetryPolicy()
 
-    monkeypatch.setattr(tracing, "cached_policy", lambda: None)
+    monkeypatch.setattr(tracing, "cached_policy", lambda **_: None)
     monkeypatch.setattr(tracing, "current_policy", policy)
 
     tracer.start_span("root", kind=trace.SpanKind.SERVER).end()

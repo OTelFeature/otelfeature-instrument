@@ -731,7 +731,9 @@ def test_otel_sdk_disabled_is_a_hard_floor(otel_enabled, level):
     with patch.object(feature_api, "get_client", return_value=client):
         source.classify(EventDetails())
         assert source.current().enabled is False
+        assert source.current(root=False).enabled is False
         assert source.cached.enabled is False
+        assert source.cached_child.enabled is False
 
     assert client.calls == 0
 
