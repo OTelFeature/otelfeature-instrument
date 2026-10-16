@@ -115,6 +115,7 @@ def test_install_tracer_provider_wires_the_flag_sampler(monkeypatch):
         (True, 0.5),
         ("x", 0.5),
         (None, 0.5),
+        (10**400, 0.5),  # an int too large for a float must not raise
     ],
 )
 def test_above_one_clamps_and_invalid_values_fall_back(value, expected):
@@ -128,8 +129,16 @@ def test_above_one_clamps_and_invalid_values_fall_back(value, expected):
         assert resolver.current() == expected
 
 
-@pytest.mark.parametrize("bad", [3.0, -0.5, math.inf, math.nan])
-def test_a_bad_value_is_logged_once(caplog, bad):
+@pytest.mark.parametrize(
+    "bad, message",
+    [
+        (3.0, "is above 1.0 - clamping to 1.0"),
+        (-0.5, "is not a valid ratio"),
+        (math.inf, "is not a valid ratio"),
+        (math.nan, "is not a valid ratio"),
+    ],
+)
+def test_a_bad_value_is_logged_once(caplog, bad, message):
     resolver = _SampleRatioResolver()
 
     class _Client:
@@ -143,6 +152,7 @@ def test_a_bad_value_is_logged_once(caplog, bad):
             resolver.current()
 
     assert len(caplog.records) == 1
+    assert message in caplog.records[0].getMessage()
 
 
 # --------------------------------------------------------------------------
@@ -420,3 +430,22 @@ def test_off_samplers_install_without_a_warning(configured, caplog):
     with caplog.at_level("WARNING", logger=sampling.__name__):
         flag_aware_sampler({"OTEL_TRACES_SAMPLER": configured})
     assert caplog.records == []
+
+
+
+def test_a_bad_value_logs_again_after_the_ratio_was_valid(caplog):
+    """Once per state change (NFR-001): bad, valid, bad again logs twice."""
+    values = iter([-0.5, -0.5, 0.3, -0.5])
+
+    class _Client:
+        def get_float_details(self, key, default_value, context=None):
+            return FlagEvaluationDetails(flag_key=key, value=next(values), reason=Reason.TARGETING_MATCH)
+
+    resolver = _SampleRatioResolver()
+    with caplog.at_level("WARNING", logger=flags.__name__), patch.object(
+        feature_api, "get_client", return_value=_Client()
+    ):
+        for _ in range(4):
+            resolver.current()
+
+    assert len([r for r in caplog.records if "not a valid ratio" in r.getMessage()]) == 2

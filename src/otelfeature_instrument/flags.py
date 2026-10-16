@@ -387,25 +387,29 @@ class _SampleRatioResolver(_CachingResolver):
         return client.get_float_details(self.flag_key, self.default, context, *_hook_options)
 
     def _normalise(self, value) -> float:
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value < 0
-        ):
+        ratio = None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                ratio = float(value)  # an int too large for a float raises
+            except OverflowError:
+                ratio = None
+        if ratio is None or not math.isfinite(ratio) or ratio < 0:
             self._warn_once(
                 value, "is not a valid ratio (negative, NaN, infinite or not a number) - "
                 "using the startup value"
             )
             return self.default
-        if value <= 1.0:
-            return float(value)
+        if ratio <= 1.0:
+            # Valid again: the next bad value is a new state change and logs.
+            self._reported_invalid = None
+            return ratio
         self._warn_once(value, "is above 1.0 - clamping to 1.0")
         return 1.0
 
     def _warn_once(self, value, problem: str) -> None:
-        # Once per offending value; a benign race may log it twice. Compared
-        # by repr() because NaN never equals itself.
+        # Once per state change (NFR-001): per offending value, reset by a
+        # valid one; a benign race may log it twice. Compared by repr()
+        # because NaN never equals itself.
         if repr(value) == self._reported_invalid:
             return
         self._reported_invalid = repr(value)
