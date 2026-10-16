@@ -41,6 +41,12 @@ from openfeature.event import EventDetails, ProviderEvent
 from openfeature.exception import ErrorCode
 from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOptions, Reason
 
+from otelfeature_instrument.rule_scope import (
+    ambient_context_is_fixed,
+    covered,
+    tracer_keys_of,
+)
+
 _logger = getLogger(__name__)
 
 FLAG_PROVIDER_ENV_VAR = "OTELFEATURE_FLAG_PROVIDER"
@@ -210,10 +216,17 @@ class _CachingResolver:
         # cached until the next event. Flag values are never `None`
         # themselves, so a cached `False` is still a cached answer.
         self._cached: object | None = None
+        # Not static, but its rule reads only keys that are fixed per tracer
+        # (see rule_scope.py): the keys it reads, or `None`.
+        self._tracer_keys: frozenset[str] | None = None
 
     @property
     def cached(self):
         return self._cached
+
+    @property
+    def tracer_keys(self) -> frozenset[str] | None:
+        return self._tracer_keys
 
     def classify(self, details: EventDetails | None = None) -> None:
         """Evaluate once, context-free, and decide whether to keep the answer.
@@ -240,6 +253,15 @@ class _CachingResolver:
         # `flags_changed`, which re-classifies.
         cacheable = reason == Reason.STATIC or details.error_code == ErrorCode.FLAG_NOT_FOUND
         self._cached = value if cacheable else None
+        # Only a rule that ran (TARGETING_MATCH/DEFAULT) is worth reading;
+        # DISABLED and errors stay per span.
+        self._tracer_keys = (
+            tracer_keys_of(self.flag_key)
+            if not cacheable
+            and details.error_code is None
+            and reason in (Reason.TARGETING_MATCH, Reason.DEFAULT)
+            else None
+        )
 
         # A missing flag was already logged by `_report()`.
         if self._cached != previous and details.error_code != ErrorCode.FLAG_NOT_FOUND:
@@ -426,6 +448,9 @@ class _PolicySource:
         # nothing reads.
         self._cached_child: TelemetryPolicy | None = None
         self._classify_lock = threading.Lock()
+        # Bumped by every classification. A tracer keeps its per-tracer
+        # policy only while this hasn't moved.
+        self._generation = 0
         # Disabled is disabled: nothing else in the policy matters then.
         self._disabled = TelemetryPolicy(
             enabled=False,
@@ -446,6 +471,10 @@ class _PolicySource:
     def cached_child(self) -> TelemetryPolicy | None:
         return self._cached_child
 
+    @property
+    def generation(self) -> int:
+        return self._generation
+
     def classify(self, details: EventDetails | None = None) -> None:
         """Registered as an OpenFeature event handler - see `_RECLASSIFY_ON`.
 
@@ -455,21 +484,22 @@ class _PolicySource:
         if self._floor:
             return
         with self._classify_lock:
-            self.enabled.classify(details)
-            self.level.classify(details)
-            self.record.classify(details)
-            self.ratio.classify(details)
-            enabled, level = self.enabled.cached, self.level.cached
-            record, ratio = self.record.cached, self.ratio.cached
-            if enabled is None or level is None or record is None:
-                self._cached = self._cached_child = None
-                return
-            self._cached_child = self._combine(
-                enabled, level, self.defaults.sample_ratio, record
-            )
-            self._cached = (
-                None if ratio is None else self._combine(enabled, level, ratio, record)
-            )
+            try:
+                self.enabled.classify(details)
+                self.level.classify(details)
+                self.record.classify(details)
+                self.ratio.classify(details)
+                enabled, level = self.enabled.cached, self.level.cached
+                record, ratio = self.record.cached, self.ratio.cached
+                if enabled is None or level is None or record is None:
+                    self._cached = self._cached_child = None
+                    return
+                self._cached_child = self._combine(enabled, level, self.defaults.sample_ratio, record)
+                self._cached = (
+                    None if ratio is None else self._combine(enabled, level, ratio, record)
+                )
+            finally:
+                self._generation += 1
 
     def current(
         self, context: EvaluationContext | None = None, *, root: bool = True
@@ -479,6 +509,27 @@ class _PolicySource:
         cached = self._cached if root else self._cached_child
         if cached is not None:
             return cached
+        return self._evaluate(context, root)
+
+    def tracer_policy(
+        self, context: EvaluationContext, present: frozenset[str], *, root: bool = True
+    ) -> TelemetryPolicy | None:
+        """The policy for every span of one tracer, or `None` when some flag
+        it needs depends on more than the tracer's resource and scope.
+
+        `context` describes the tracer only; `present` is the set of keys in
+        it. A rule reading a key the tracer doesn't have stays per span.
+        """
+        needed = (self.enabled, self.level, self.record) + ((self.ratio,) if root else ())
+        for resolver in needed:
+            if resolver.cached is not None:
+                continue
+            keys = resolver.tracer_keys
+            if keys is None or not covered(keys, present):
+                return None
+        return self._evaluate(context, root)
+
+    def _evaluate(self, context: EvaluationContext | None, root: bool) -> TelemetryPolicy:
         enabled = self.enabled.current(context)
         if not enabled:
             # With tracing off nothing else is evaluated at all.
@@ -562,6 +613,26 @@ def cached_policy(*, root: bool = True) -> TelemetryPolicy | None:
     `root=False` (a span with a parent) doesn't need `traceSampleRatio`.
     """
     return _policy_source.cached if root else _policy_source.cached_child
+
+
+def tracer_policy(
+    context: EvaluationContext, present: frozenset[str], *, root: bool = True
+) -> TelemetryPolicy | None:
+    """The policy for all spans of one tracer, if every flag allows that.
+
+    `context` describes the tracer (resource and scope keys only), `present`
+    lists its keys. Valid until `policy_generation()` moves, and only while
+    `ambient_context_is_fixed()`.
+    """
+    return _policy_source.tracer_policy(context, present, root=root)
+
+
+def per_tracer_possible() -> bool:
+    return ambient_context_is_fixed()
+
+
+def policy_generation() -> int:
+    return _policy_source.generation
 
 
 def current_policy(

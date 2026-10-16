@@ -15,9 +15,11 @@ evaluation_context.py.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import logging
 from logging import getLogger
 from typing import Any, Iterator, Mapping
 
+from openfeature.evaluation_context import EvaluationContext
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.context import Context
@@ -33,8 +35,16 @@ from otelfeature_instrument.evaluation_context import (
     PresetTraceIdGenerator,
     resource_attributes,
     span_context,
+    tracer_context,
 )
-from otelfeature_instrument.flags import TelemetryPolicy, cached_policy, current_policy
+from otelfeature_instrument.flags import (
+    TelemetryPolicy,
+    cached_policy,
+    current_policy,
+    per_tracer_possible,
+    policy_generation,
+    tracer_policy,
+)
 from otelfeature_instrument.sampling import flag_aware_sampler, handover
 
 
@@ -70,6 +80,39 @@ class _VerbosityAwareTracer(Tracer):
         self._scope_version = scope_version
         self._resource = resource or {}
         self._ids = ids
+        # generation -> {root: policy or None}; `None` means "this tracer has
+        # to evaluate per span". Filled lazily, root and child separately.
+        self._per_tracer: tuple[int, dict[bool, TelemetryPolicy | None]] = (-1, {})
+        self._tracer_ctx: tuple[EvaluationContext, frozenset[str]] | None = None
+
+    def _tracer_policy(self, root: bool) -> TelemetryPolicy | None:
+        """Decided once per tracer, for rules that read only resource and scope
+        keys; recomputed after every provider event.
+
+        If the ruleset changes, spans in the few milliseconds before the
+        configuration-changed event is handled may still be decided with the
+        previous per-tracer answer, or with the new rule against the tracer
+        context; the event's new generation corrects both.
+        """
+        if not per_tracer_possible():
+            return None
+        # Read the generation before evaluating: an event landing in between
+        # leaves the result tagged stale, and the next span redoes it.
+        generation = policy_generation()
+        cached_generation, decided = self._per_tracer
+        if cached_generation != generation:
+            decided = {}
+            self._per_tracer = (generation, decided)
+        if root not in decided:
+            if self._tracer_ctx is None:
+                self._tracer_ctx = tracer_context(
+                    base=self._resource,
+                    scope_name=self._scope_name,
+                    scope_version=self._scope_version,
+                )
+            context, present = self._tracer_ctx
+            decided[root] = tracer_policy(context, present, root=root)
+        return decided[root]
 
     @staticmethod
     def _decide(policy: TelemetryPolicy, kind: SpanKind) -> int:
@@ -189,6 +232,21 @@ class _VerbosityAwareTracer(Tracer):
                     return self._drop(context, None, kind=kind)
                 return self._wrapped.start_span(*args)
 
+        policy = self._tracer_policy(root=not parent.is_valid)
+        if policy is not None:
+            # Decided for the whole tracer: no span context, no trace-id
+            # handover - nothing in it depends on the trace.
+            decision = self._decide(policy, kind)
+            if decision == _STAND_IN:
+                return None
+            if decision == _DROP_TRACE:
+                return self._drop(context, None, kind=kind)
+            handover(policy)
+            try:
+                return self._wrapped.start_span(*args)
+            finally:
+                handover(None)
+
         policy, root_id = self._evaluate(parent, name, kind, attributes)
         decision = self._decide(policy, kind)
         if decision == _STAND_IN:
@@ -305,6 +363,14 @@ class _VerbosityAwareTracerProvider(TracerProvider):
         schema_url: str | None = None,
         attributes: otel_types.Attributes | None = None,
     ) -> Tracer:
+        if _logger.isEnabledFor(logging.DEBUG):
+            # How to find the `otel.scope.name` to target: run once with
+            # DEBUG logging for otelfeature_instrument.
+            _logger.debug(
+                "otelfeature-instrument: tracer for otel.scope.name=%r (version %r)",
+                instrumenting_module_name,
+                instrumenting_library_version,
+            )
         real_tracer = self._wrapped.get_tracer(
             instrumenting_module_name,
             instrumenting_library_version,
