@@ -459,7 +459,7 @@ can close the loop on its own - no outside script, no new metric:
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | flagd key of the selective-drop flag |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
-| `OTEL_METRICS_EXPORTER`       | `otlp`     | `none` installs no meter provider at all - and so no error rate |
+| `OTEL_METRICS_EXPORTER`       | `otlp`     | `none` installs no meter provider at all - and so no error rate. Only `none` is recognised; any other value still exports via OTLP/HTTP |
 | `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections (see [Error rate](#error-rate-in-the-context)) |
 | `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10` | Minimum requests per interval before an error rate is published |
 | `OTEL_SEMCONV_STABILITY_OPT_IN` | -       | Set to `http` so the HTTP instrumentation emits `http.server.request.duration` with `error.type` |

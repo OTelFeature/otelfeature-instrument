@@ -399,17 +399,18 @@ def test_min_requests_from_environment(raw, expected):
 
 
 
-@pytest.mark.parametrize("value", ["none", " NONE ", "none,"])
-def test_metrics_exporter_none_installs_no_metrics_sdk_and_no_error_rate(monkeypatch, value):
+@pytest.mark.parametrize("value", ["none", " NONE "])
+def test_metrics_exporter_none_installs_no_metrics_sdk_and_no_error_rate(monkeypatch, value, caplog):
     """Metrics off means no metrics SDK: no reader, so the rate stays absent."""
     monkeypatch.setenv(metrics.METRICS_EXPORTER_ENV_VAR, value)
     monkeypatch.setattr(metrics, "MeterProvider", lambda **_: pytest.fail("built a MeterProvider"))
     monkeypatch.setattr(metrics.metrics, "set_meter_provider", lambda _: pytest.fail("installed one"))
     monkeypatch.setattr(ErrorRatePublisher, "start", lambda self: pytest.fail("started the publisher"))
 
-    metrics.install_meter_provider(Resource.create())
+    with caplog.at_level("INFO", logger=metrics.__name__):
+        metrics.install_meter_provider(Resource.create())
 
-    assert ERROR_RATE_KEY not in evaluation_context._live
+    assert "no meter provider, no error rate" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -419,8 +420,16 @@ def test_metrics_exporter_none_installs_no_metrics_sdk_and_no_error_rate(monkeyp
         ({"OTEL_METRICS_EXPORTER": "otlp"}, False),
         ({"OTEL_METRICS_EXPORTER": ""}, False),
         ({"OTEL_METRICS_EXPORTER": "none"}, True),
+        ({"OTEL_METRICS_EXPORTER": "console"}, False),
+        ({"OTEL_METRICS_EXPORTER": "none,"}, False),  # as the SDK: not exactly "none"
         ({"OTEL_METRICS_EXPORTER": "otlp,none"}, False),
     ],
 )
 def test_metrics_disabled(environ, disabled):
     assert metrics.metrics_disabled(environ) is disabled
+
+
+def test_none_mixed_with_exporters_warns(caplog):
+    with caplog.at_level("WARNING", logger=metrics.__name__):
+        assert metrics.metrics_disabled({"OTEL_METRICS_EXPORTER": "otlp, none"}) is False
+    assert "mixes 'none' with exporters" in caplog.text

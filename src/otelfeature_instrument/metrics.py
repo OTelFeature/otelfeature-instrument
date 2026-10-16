@@ -23,11 +23,22 @@ METRICS_EXPORTER_ENV_VAR = "OTEL_METRICS_EXPORTER"
 
 
 def metrics_disabled(environ: Mapping[str, str] = os.environ) -> bool:
-    """`OTEL_METRICS_EXPORTER=none` (and nothing else listed) switches metrics off."""
-    exporters = {
-        name.strip().lower() for name in environ.get(METRICS_EXPORTER_ENV_VAR, "").split(",")
-    } - {""}
-    return exporters == {"none"}
+    """`OTEL_METRICS_EXPORTER=none` switches metrics off - parsed as the SDK
+    does (`value.lower().strip() == "none"`). Any other value keeps the OTLP
+    exporter: this launcher doesn't select exporters, it only honours `none`.
+    """
+    value = environ.get(METRICS_EXPORTER_ENV_VAR, "").lower().strip()
+    if value == "none":
+        return True
+    if "none" in {name.strip() for name in value.split(",")}:
+        # The SDK rejects this; Java autoconfigure treats it as an error.
+        _logger.warning(
+            "otelfeature-instrument: %s=%r mixes 'none' with exporters - "
+            "metrics stay on; set exactly 'none' to switch them off",
+            METRICS_EXPORTER_ENV_VAR,
+            value,
+        )
+    return False
 
 
 def install_meter_provider(resource: Resource) -> None:
