@@ -35,6 +35,28 @@ RESOURCE_KEYS = (
 )
 
 
+# Process-wide values that change over time (e.g. the error rate), merged
+# into every span-start context. Replaced wholesale rather than mutated, so a
+# reader always sees one consistent snapshot without a lock.
+_live: Mapping[str, Any] = {}
+
+# Keys under this namespace belong to the extension, present or not: a span
+# start attribute in it is always dropped, so it can't stand in for a live
+# value that is momentarily absent (no requests, a failed collection).
+RESERVED_NAMESPACE = "otelfeature"
+
+
+def set_live_attribute(key: str, value: Any | None) -> None:
+    """Publish `value` under `key` in every span-start context; `None` removes it."""
+    global _live
+    live = dict(_live)
+    if value is None:
+        live.pop(key, None)
+    else:
+        live[key] = value
+    _live = live
+
+
 def nest(flat: Mapping[str, Any]) -> dict[str, Any]:
     """Nest dotted keys by segment: `{"a.b": 1}` becomes `{"a": {"b": 1}}`.
 
@@ -96,12 +118,13 @@ def span_context(
 ) -> EvaluationContext:
     """The context for one span-start decision. Only built off the static path.
 
-    Resource keys and the keys set here win over the span's own start
+    Resource keys, live keys and the keys set here win over the span's own start
     attributes: an attribute named like one of them - or one that would turn
     one of them into a namespace, such as `span.kind.detail` - is dropped
     rather than allowed to replace or hide it.
     """
     owned: dict[str, Any] = dict(base)
+    owned.update(_live)
     owned["otel.scope.name"] = scope_name
     if scope_version:
         owned["otel.scope.version"] = scope_version
@@ -110,7 +133,7 @@ def span_context(
 
     flat: dict[str, Any] = {}
     for key, value in (attributes or {}).items():
-        if any(_overlaps(key, own) for own in owned):
+        if _overlaps(key, RESERVED_NAMESPACE) or any(_overlaps(key, own) for own in owned):
             _logger.debug(
                 "otelfeature-instrument: dropping start attribute %r from the "
                 "evaluation context - it clashes with a key set by the extension",

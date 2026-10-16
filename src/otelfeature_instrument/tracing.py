@@ -35,6 +35,7 @@ from otelfeature_instrument.evaluation_context import (
     span_context,
 )
 from otelfeature_instrument.flags import TelemetryPolicy, cached_policy, current_policy
+from otelfeature_instrument.sampling import flag_aware_sampler, handover
 
 
 _logger = getLogger(__name__)
@@ -116,14 +117,13 @@ class _VerbosityAwareTracer(Tracer):
 
     def _evaluate(
         self,
+        parent: trace.SpanContext,
         name: str,
-        context: Context | None,
         kind: SpanKind,
         attributes: otel_types.Attributes,
     ) -> tuple[TelemetryPolicy, int | None]:
         """Evaluate with a span context; returns the policy and, for a root,
         the trace id it was evaluated on. Off the static path only."""
-        parent = trace.get_current_span(context).get_span_context()
         if parent.is_valid:
             trace_id, root_id = parent.trace_id, None
         elif self._ids is not None:
@@ -143,7 +143,8 @@ class _VerbosityAwareTracer(Tracer):
                 kind=kind,
                 attributes=attributes,
                 trace_id=trace_id,
-            )
+            ),
+            root=not parent.is_valid,
         )
         return policy, root_id
 
@@ -175,23 +176,38 @@ class _VerbosityAwareTracer(Tracer):
                 return self._drop(context, None, kind=kind)
             return self._wrapped.start_span(*args)
 
-        policy, root_id = self._evaluate(name, context, kind, attributes)
+        parent = trace.get_current_span(context).get_span_context()
+        if parent.is_valid:
+            # A child: only `traceSampleRatio` may be non-static, and a child
+            # never reads it.
+            policy = cached_policy(root=False)
+            if policy is not None:
+                decision = self._decide(policy, kind)
+                if decision == _STAND_IN:
+                    return None
+                if decision == _DROP_TRACE:
+                    return self._drop(context, None, kind=kind)
+                return self._wrapped.start_span(*args)
+
+        policy, root_id = self._evaluate(parent, name, kind, attributes)
         decision = self._decide(policy, kind)
         if decision == _STAND_IN:
             return None
         if decision == _DROP_TRACE:
             # A dropped root keeps the trace id it was evaluated on.
             return self._drop(context, root_id, kind=kind)
-        if root_id is None:
-            return self._wrapped.start_span(*args)
-        # Set only around the one call that consumes it: anything that started
-        # a span during the flag evaluation above (a hook, an instrumented
-        # provider) must not have picked this id up.
-        self._ids.preset(root_id)
+        # Both handovers are set only around the one call that consumes them:
+        # anything that started a span during the flag evaluation above (a
+        # hook, an instrumented provider) must not have picked them up.
+        if root_id is not None:
+            self._ids.preset(root_id)
+        handover(policy)
         try:
             return self._wrapped.start_span(*args)
         finally:
-            self._ids.preset(None)
+            handover(None)
+            if root_id is not None:
+                self._ids.preset(None)
 
     def start_span(
         self,
@@ -310,6 +326,6 @@ class _VerbosityAwareTracerProvider(TracerProvider):
 
 
 def install_tracer_provider(resource: Resource) -> None:
-    provider = SDKTracerProvider(resource=resource)
+    provider = SDKTracerProvider(resource=resource, sampler=flag_aware_sampler())
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     trace.set_tracer_provider(_VerbosityAwareTracerProvider(provider))

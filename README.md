@@ -24,6 +24,7 @@ re-read live:
 | `otelEnabled`    | `true`  | no effect, `telemetryLevel` decides (default)             |
 | `otelEnabled`    | `false` | every span suppressed - identical to `telemetryLevel=OFF` |
 | `recordSpan`     | `false` | the span is dropped - per span when a targeting rule decides it (see [Dropping selected spans](#dropping-selected-spans-recordspan)) |
+| `traceSampleRatio` | `0.0`-`1.0` | probability a new trace is sampled - a live `OTEL_TRACES_SAMPLER_ARG` (see [Sampling](#sampling-tracesampleratio)) |
 
 `otelEnabled` is the plain on/off switch; `OFF` is the same thing for
 operators who already manage `telemetryLevel`. Both **fail open**: a missing
@@ -157,6 +158,7 @@ Enforcement points never read a flag directly. `current_policy()` in
 | `enabled`           | `otelEnabled` and `telemetryLevel != OFF`      | `OTEL_SDK_DISABLED` is not `true` (a hard floor) |
 | `suppress_internal` | `telemetryLevel == IO`                        | `false`                           |
 | `record_span`       | `recordSpan` (only while `enabled`)           | `true`                            |
+| `sample_ratio`      | `traceSampleRatio`, clamped to 0.0-1.0        | `OTEL_TRACES_SAMPLER` / `_ARG`, as the SDK reads them (`1.0` by default) |
 
 **Every field falls back to its startup value**, resolved from the
 environment once when the process starts. With flagd unreachable or a flag
@@ -264,6 +266,67 @@ boolean flag `recordSpan` (default `true`), evaluated against the
   the other flags; with targeting it is evaluated per span.
 - The key can be renamed with `OTELFEATURE_RECORD_SPAN_FLAG_NAME`.
 
+`OTEL_TRACES_SAMPLER_ARG` is read once, when the SDK starts. "Turn sampling up
+to 100% for this service for ten minutes" needs it live, so
+`traceSampleRatio` (a float flag, `0.0`-`1.0`) backs the sampler instead:
+
+- **Parent-based.** A span with a parent follows the parent's decision; only
+  a root asks the flag. A trace is never half sampled, even if the flag
+  flips while it is in flight.
+- **Same rule as the Python SDK's `TraceIdRatioBased`:** the low 64 bits
+  of the trace id, unsigned, against `ratio * 2^64`. Every Python service
+  that applies the same ratio to the same trace makes the same call.
+  **Not across languages:** the Java SDK (and so
+  `otelfeature-java-extension`) compares the low 64 bits as a *signed*
+  long against `ratio * Long.MAX_VALUE`, so at the same ratio Java and
+  Python can disagree on a given trace id. With parent-based sampling this
+  doesn't matter - only the entry service decides, everyone downstream
+  follows its `traceparent`. Where several entry services in different
+  languages must agree on the same traces, bucket with a flagd
+  `fractional` rule on `targetingKey` (the trace id), which every flagd
+  evaluator computes identically, and serve `0.0`/`1.0` per bucket.
+- **`0.0` is `always_off`**, `1.0` is `always_on` - no separate flag needed.
+- **Never throws on the hot path.** Out of range is clamped; a non-numeric
+  or NaN value falls back to the startup value (logged once).
+- **Startup fallback** is the ratio `OTEL_TRACES_SAMPLER`/`_ARG` amount to,
+  parsed as the SDK parses them (`traceidratio` its argument, anything else
+  `1.0`). The sampler itself is parent-based: with a non-parent-based
+  `always_on` or `traceidratio`, a span with a sampled parent is sampled
+  whatever the ratio - logged as a warning at startup.
+- **`always_off` is a hard floor**, like `OTEL_SDK_DISABLED`: flags never
+  enable what the env var switched off. With `OTEL_TRACES_SAMPLER=always_off`
+  nothing is sampled - not by `traceSampleRatio`, not via a sampled upstream
+  parent. With `parentbased_always_off` no trace starts sampled in this
+  service, whatever the flag says; spans with a parent follow it, as the
+  SDK's sampler of that name does. Custom samplers (entry points such
+  as `jaeger_remote`) are not loaded by `otelfeature-instrument` - an
+  unknown name falls back to `1.0`, as the plain SDK provider would.
+- **Only roots evaluate it.** A span with a parent never asks
+  `traceSampleRatio`, so targeting on the ratio costs one evaluation per
+  trace in each service, not one per span.
+- **Targetable** with the [evaluation context](#the-evaluation-context): a
+  ratio per `service.name` or `deployment.environment.name`, or a
+  `fractional` rollout on `targetingKey` - the trace id, so a trace lands in
+  the same bucket in every service.
+
+> **Flip it at the entry point.** Sampling decisions do not apply
+> retroactively or mid-trace: with parent-based sampling, the service that
+> starts the trace decides, and every downstream service follows the
+> decision it receives in `traceparent`. Raising `traceSampleRatio` on a
+> downstream service changes almost nothing - only traces that *start*
+> there. Target the edge service (or use the same rule everywhere).
+
+**Compared with `jaeger_remote`.** OpenTelemetry already has a remotely
+controlled sampler, `jaeger_remote`, which polls a Jaeger-compatible
+sampling endpoint for per-service and per-operation strategies. It is the
+right choice if you run that infrastructure. `traceSampleRatio` reuses the
+flag infrastructure (flagd, OpenFeature) the organisation already operates
+for everything else, and gets OpenFeature targeting with it: ratios by any
+key in the evaluation context, percentage rollouts, and the same audit trail
+and tooling as every other flag. (OpenTelemetry Python ships no
+`jaeger_remote` sampler, and `otelfeature-instrument` doesn't load sampler
+entry points; the comparison is with the other SDKs and the Collector.)
+
 ### The evaluation context
 
 When a flag carries `targeting`, each span start is described to it in
@@ -276,6 +339,7 @@ against the same names as the telemetry itself:
 | Instrumentation scope          | `otel.scope.name`, `otel.scope.version` |
 | Span at start                  | `span.kind` (lower-case: `server`, `client`, `internal`, `producer`, `consumer`), `span.name`, plus every attribute the span is started with - typically `url.path`, `http.request.method`, `server.address`, `db.system.name`, `db.operation.name`, `rpc.service` |
 | `targetingKey`                 | the **trace id** (32 hex digits), so `fractional` buckets a whole trace the same way in every service |
+| Live, per process              | `otelfeature.http.server.error_rate` - see [Error rate](#error-rate-in-the-context). The whole `otelfeature.*` namespace is reserved: start attributes in it are dropped |
 
 ```json
 "targeting": {
@@ -328,6 +392,62 @@ a benchmark; reproduce with `uv run python benchmarks/span_cost.py`):
 Targeting costs one in-process flag evaluation per span, so it belongs on a
 flag while it is being used, not left on permanently.
 
+### Error rate in the context
+
+`otelfeature.http.server.error_rate` (a number, 0.0-1.0) is the service's
+HTTP server error rate over the last collection interval, so a flagd rule
+can close the loop on its own - no outside script, no new metric:
+
+```json
+"traceSampleRatio": {
+  "state": "ENABLED", "defaultVariant": "low",
+  "variants": { "low": 0.1, "all": 1.0 },
+  "targeting": { "if": [
+    { ">": [ { "var": "otelfeature.http.server.error_rate" }, 0.05 ] }, "all", "low"
+  ] }
+}
+```
+
+- **Input:** the `http.server.request.duration` histogram the HTTP server
+  instrumentation already records - not spans, because a sampled-out span
+  never records a status, while metrics are recorded whatever the sampling
+  does. Turning sampling down does not blind the loop.
+- **How:** an extra in-process reader with *delta* temporality sits next to
+  the OTLP reader and is collected every `OTELFEATURE_ERROR_RATE_INTERVAL`
+  seconds (default `10`). Each collection is its own window:
+  `requests with error.type / all requests`. No smoothing. The OTLP reader,
+  its temporality and what it exports are unchanged.
+- **Too few requests in the interval:** below
+  `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` (default `10`) the key is left out
+  of the context - a rule comparing it then sees `null`, which is not
+  `> 0.05`. One failure in one request can't publish `1.0` and flip the
+  loop. The flip side: a service seeing fewer requests than that per
+  interval (under 1 req/s at the defaults) never gets a rate, even in a
+  total outage - lower the minimum or lengthen the interval for quiet
+  services.
+- **Per service:** each process measures and publishes its own rate, so a
+  rule raises sampling for the service whose errors went up.
+- **Lags:** the rate a rule sees describes the *previous* interval, so it
+  reacts one to two intervals after errors start.
+- **Metrics off, no rate:** with `OTEL_METRICS_EXPORTER=none` no meter
+  provider is installed - no metrics SDK, so no error-rate reader either.
+  The key is then always absent and rules on it never match.
+- **Span-start contexts only:** the key is merged into the contexts the
+  extension builds for span decisions, not into OpenFeature evaluations the
+  application makes itself.
+
+> **Set `OTEL_SEMCONV_STABILITY_OPT_IN=http`.** The Python HTTP
+> instrumentations only emit `http.server.request.duration` (with
+> `error.type`) with the stable HTTP semantic conventions opted in.
+> Without it they emit the older `http.server.duration`, which has no
+> `error.type`; the rate then falls back to counting
+> `http.status_code >= 500`. With `http/dup` both metrics are emitted; only
+> the stable one is counted. Either way an unhandled exception in a bare
+> ASGI app is recorded with neither `error.type` nor a status code and is not
+> counted - frameworks such as FastAPI/Starlette turn it into a `500` first,
+> so it is. `otelfeature-instrument` does not set the opt-in itself,
+> because it also renames the metrics and attributes your dashboards see.
+
 ## Configuration
 
 | Environment variable         | Default    | Description                                                    |
@@ -339,6 +459,11 @@ flag while it is being used, not left on permanently.
 | `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | flagd key of the selective-drop flag |
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
+| `OTEL_METRICS_EXPORTER`       | `otlp`     | `none` installs no meter provider at all - and so no error rate. Only `none` is recognised; any other value still exports via OTLP/HTTP |
+| `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections (see [Error rate](#error-rate-in-the-context)) |
+| `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10` | Minimum requests per interval before an error rate is published |
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | -       | Set to `http` so the HTTP instrumentation emits `http.server.request.duration` with `error.type` |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback ratio for `traceSampleRatio`; `always_off` / `parentbased_always_off` are hard floors no flag overrides; the sampler is parent-based and custom samplers are not loaded |
 
 The `telemetryLevel` (variants `FULL`/`IO`/`OFF`) and `otelEnabled` (boolean)
 flags should exist in whatever flagd instance `FLAGD_HOST`/`FLAGD_PORT` point
@@ -379,8 +504,9 @@ without an incoming parent the trace is also split downstream.
   a private module of `opentelemetry-instrumentation` - hence the exact
   version pin in [pyproject.toml](pyproject.toml). A future
   `opentelemetry-instrumentation` release could change or remove it.
-- The flag keys (`telemetryLevel`, `otelEnabled`) and variants
-  (`FULL`/`IO`/`OFF`) are hardcoded for now, not yet configurable per consuming application.
+- The flag keys (`telemetryLevel`, `otelEnabled`, `traceSampleRatio`) and
+  variants (`FULL`/`IO`/`OFF`) are hardcoded for now, not yet configurable
+  per consuming application.
 - Only traces and metrics are bootstrapped (matching
   [poc-otelfeature](https://github.com/OTelFeature/poc)'s current scope) -
   no log correlation setup.

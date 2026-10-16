@@ -372,3 +372,26 @@ def test_a_remote_parent_with_an_invalid_span_id_is_a_plain_root(flagd):
     context = dropped.get_span_context()
     assert context.is_valid and context.trace_id != 0xABC
     assert not context.trace_flags.sampled
+
+
+def test_a_proxied_request_is_dropped_when_only_the_ratio_is_targeted(flagd):
+    """The child-policy path (#13): recordSpan static false, traceSampleRatio
+    targeted - a remote-parent SERVER span still drops as a root."""
+    flagd(
+        {
+            RECORD_SPAN_FLAG_KEY: {"state": "ENABLED", "defaultVariant": "off", "variants": {"off": False}},
+            "traceSampleRatio": {
+                "state": "ENABLED",
+                "defaultVariant": "all",
+                "variants": {"all": 1.0},
+                "targeting": {"if": [{"==": [{"var": "url.path"}, "/never"]}, "all", None]},
+            },
+        }
+    )
+    assert flags._policy_source.cached is None and flags._policy_source.cached_child is not None
+    exporter = InMemorySpanExporter()
+
+    dropped = _tracer(exporter).start_span("GET /", context=_remote(), kind=trace.SpanKind.SERVER)
+
+    assert dropped.get_span_context().trace_id == 0xABC
+    assert not dropped.get_span_context().trace_flags.sampled

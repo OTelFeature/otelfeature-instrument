@@ -15,7 +15,7 @@ from otelfeature_instrument.tracing import _VerbosityAwareTracerProvider
 
 def _flags(*, enabled=True, level="FULL"):
     """Serve the policy these flag values combine into, as the real source would."""
-    policy = _PolicySource()._combine(enabled, level)
+    policy = _PolicySource()._combine(enabled, level, 1.0)
     return patch("otelfeature_instrument.tracing.current_policy", return_value=policy)
 
 
@@ -230,9 +230,9 @@ def test_real_policy_source_drives_the_tracer(monkeypatch, enabled, level, expor
 
     class _Client:
         def _get(self, key, default_value, context=None):
-            return FlagEvaluationDetails(flag_key=key, value=values.get(key, True), reason=Reason.STATIC)
+            return FlagEvaluationDetails(flag_key=key, value=values.get(key, 1.0 if key == "traceSampleRatio" else True), reason=Reason.STATIC)
 
-        get_string_details = get_boolean_details = _get
+        get_string_details = get_boolean_details = get_float_details = _get
 
     monkeypatch.setattr(flags, "_policy_source", _PolicySource())
     monkeypatch.setattr(feature_api, "get_client", lambda: _Client())
