@@ -6,12 +6,17 @@ any kind is. Either way, `start_span`/`start_as_current_span` just hand back
 whatever span was already current. Anything created "under" a suppressed
 span therefore attaches directly to its real parent instead of to the
 suppressed span, so no orphaned parent references are produced.
+
+When a flag carries targeting, each span start is described to it through an
+evaluation context built from semantic conventions - see
+evaluation_context.py.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Iterator
+from logging import getLogger
+from typing import Any, Iterator, Mapping
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -23,7 +28,15 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Link, Span, SpanKind, Tracer, TracerProvider
 from opentelemetry.util import types as otel_types
 
-from otelfeature_instrument.flags import current_policy
+from otelfeature_instrument.evaluation_context import (
+    PresetTraceIdGenerator,
+    resource_attributes,
+    span_context,
+)
+from otelfeature_instrument.flags import TelemetryPolicy, cached_policy, current_policy
+
+
+_logger = getLogger(__name__)
 
 
 def _stand_in(span: Span) -> Span:
@@ -35,16 +48,95 @@ def _stand_in(span: Span) -> Span:
 
 
 class _VerbosityAwareTracer(Tracer):
-    def __init__(self, wrapped: Tracer) -> None:
+    def __init__(
+        self,
+        wrapped: Tracer,
+        *,
+        scope_name: str = "",
+        scope_version: str | None = None,
+        resource: Mapping[str, Any] | None = None,
+        ids: PresetTraceIdGenerator | None = None,
+    ) -> None:
         self._wrapped = wrapped
+        self._scope_name = scope_name
+        self._scope_version = scope_version
+        self._resource = resource or {}
+        self._ids = ids
 
     @staticmethod
-    def _suppress(kind: SpanKind) -> bool:
+    def _suppress(policy: TelemetryPolicy, kind: SpanKind) -> bool:
         # Traces only: metrics are not routed through here and keep flowing.
-        policy = current_policy()
         if not policy.enabled:
             return True
         return kind is SpanKind.INTERNAL and policy.suppress_internal
+
+    def _evaluate(
+        self,
+        name: str,
+        context: Context | None,
+        kind: SpanKind,
+        attributes: otel_types.Attributes,
+    ) -> tuple[TelemetryPolicy, int | None]:
+        """Evaluate with a span context; returns the policy and, for a root,
+        the trace id it was evaluated on. Off the static path only."""
+        parent = trace.get_current_span(context).get_span_context()
+        if parent.is_valid:
+            trace_id, root_id = parent.trace_id, None
+        elif self._ids is not None:
+            # A root: mint its trace id now, so `targetingKey` is the id the
+            # span will actually carry and `fractional` buckets the whole trace
+            # alike in every service. It is only handed to the SDK once the
+            # span is definitely created - see `_start`.
+            trace_id = root_id = self._ids.new_trace_id()
+        else:
+            trace_id = root_id = None
+        policy = current_policy(
+            span_context(
+                base=self._resource,
+                scope_name=self._scope_name,
+                scope_version=self._scope_version,
+                name=name,
+                kind=kind,
+                attributes=attributes,
+                trace_id=trace_id,
+            )
+        )
+        return policy, root_id
+
+    def _start(
+        self,
+        name: str,
+        context: Context | None,
+        kind: SpanKind,
+        attributes: otel_types.Attributes,
+        links: list[Link] | None,
+        start_time: int | None,
+        record_exception: bool,
+        set_status_on_exception: bool,
+    ) -> Span | None:
+        """The real span, or `None` when it is suppressed."""
+        args = (name, context, kind, attributes, links, start_time, record_exception,
+                set_status_on_exception)
+        policy = cached_policy()
+        if policy is not None:
+            # The static path: no context, no trace-id handover.
+            if self._suppress(policy, kind):
+                return None
+            return self._wrapped.start_span(*args)
+
+        policy, root_id = self._evaluate(name, context, kind, attributes)
+        if self._suppress(policy, kind):
+            return None
+        if root_id is None:
+            return self._wrapped.start_span(*args)
+        # Set only around the one call that consumes it: anything that started
+        # a span during the flag evaluation above (a hook, an instrumented
+        # provider) must not have picked this id up.
+        self._ids.preset(root_id)
+        try:
+            return self._wrapped.start_span(*args)
+        finally:
+            self._ids.preset(None)
 
     def start_span(
         self,
@@ -57,9 +149,7 @@ class _VerbosityAwareTracer(Tracer):
         record_exception: bool = True,
         set_status_on_exception: bool = True,
     ) -> Span:
-        if self._suppress(kind):
-            return _stand_in(trace.get_current_span(context))
-        return self._wrapped.start_span(
+        span = self._start(
             name,
             context,
             kind,
@@ -69,6 +159,9 @@ class _VerbosityAwareTracer(Tracer):
             record_exception,
             set_status_on_exception,
         )
+        if span is None:
+            return _stand_in(trace.get_current_span(context))
+        return span
 
     @contextmanager
     def start_as_current_span(
@@ -83,7 +176,17 @@ class _VerbosityAwareTracer(Tracer):
         set_status_on_exception: bool = True,
         end_on_exit: bool = True,
     ) -> Iterator[Span]:
-        if self._suppress(kind):
+        span = self._start(
+            name,
+            context,
+            kind,
+            attributes,
+            links,
+            start_time,
+            record_exception,
+            set_status_on_exception,
+        )
+        if span is None:
             if context is None:
                 yield _stand_in(trace.get_current_span())
                 return
@@ -96,16 +199,13 @@ class _VerbosityAwareTracer(Tracer):
             finally:
                 otel_context.detach(token)
             return
-        with self._wrapped.start_as_current_span(
-            name,
-            context,
-            kind,
-            attributes,
-            links,
-            start_time,
-            record_exception,
-            set_status_on_exception,
-            end_on_exit,
+        # What the SDK's own start_as_current_span does with the span from
+        # start_span; reproduced so the decision above is made only once.
+        with trace.use_span(
+            span,
+            end_on_exit=end_on_exit,
+            record_exception=record_exception,
+            set_status_on_exception=set_status_on_exception,
         ) as span:
             yield span
 
@@ -113,6 +213,19 @@ class _VerbosityAwareTracer(Tracer):
 class _VerbosityAwareTracerProvider(TracerProvider):
     def __init__(self, wrapped: TracerProvider) -> None:
         self._wrapped = wrapped
+        # Resource keys are the same for every span: extracted once, merged
+        # per evaluation.
+        self._resource = resource_attributes(getattr(wrapped, "resource", None))
+        self._ids: PresetTraceIdGenerator | None = None
+        if isinstance(wrapped, SDKTracerProvider):
+            self._ids = PresetTraceIdGenerator(wrapped.id_generator)
+            wrapped.id_generator = self._ids
+        else:
+            _logger.info(
+                "otelfeature-instrument: %s is not an SDK TracerProvider - root "
+                "spans are evaluated without a targetingKey",
+                type(wrapped).__name__,
+            )
 
     def get_tracer(
         self,
@@ -127,7 +240,18 @@ class _VerbosityAwareTracerProvider(TracerProvider):
             schema_url,
             attributes,
         )
-        return _VerbosityAwareTracer(real_tracer)
+        if self._ids is not None and getattr(real_tracer, "id_generator", self._ids) is not self._ids:
+            # The SDK caches tracers per scope and copies the provider's
+            # generator into each on creation: one obtained before this
+            # wrapper existed still holds the old generator.
+            real_tracer.id_generator = self._ids
+        return _VerbosityAwareTracer(
+            real_tracer,
+            scope_name=instrumenting_module_name,
+            scope_version=instrumenting_library_version,
+            resource=self._resource,
+            ids=self._ids,
+        )
 
 
 def install_tracer_provider(resource: Resource) -> None:

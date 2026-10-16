@@ -376,12 +376,20 @@ def _register_event_handlers() -> None:
         feature_api.add_handler(event, _policy_source.classify)
 
 
+def cached_policy() -> TelemetryPolicy | None:
+    """The policy while every flag is static, else `None`.
+
+    Lets a caller skip building an evaluation context it would not need: on
+    the static path nothing is evaluated, so nothing has to be described.
+    """
+    return _policy_source.cached
+
+
 def current_policy(context: EvaluationContext | None = None) -> TelemetryPolicy:
     """The current policy, evaluating only the flags that aren't static.
 
-    `context` is the seam for contextual evaluation: it's forwarded to the
-    provider on the non-static path, and ignored on the static path (where
-    there is nothing to evaluate). Callers pass nothing today; describing the
-    span - and eventually its OTel attributes - to a targeting rule goes here.
+    `context` is forwarded to the provider for every flag that carries
+    targeting, and ignored on the static path (where there is nothing to
+    evaluate).
     """
     return _policy_source.current(context)
