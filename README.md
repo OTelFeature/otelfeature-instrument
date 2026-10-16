@@ -266,6 +266,8 @@ boolean flag `recordSpan` (default `true`), evaluated against the
   the other flags; with targeting it is evaluated per span.
 - The key can be renamed with `OTELFEATURE_RECORD_SPAN_FLAG_NAME`.
 
+### Sampling: `traceSampleRatio`
+
 `OTEL_TRACES_SAMPLER_ARG` is read once, when the SDK starts. "Turn sampling up
 to 100% for this service for ten minutes" needs it live, so
 `traceSampleRatio` (a float flag, `0.0`-`1.0`) backs the sampler instead:
@@ -544,13 +546,17 @@ can close the loop on its own - no outside script, no new metric:
 | `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections (see [Error rate](#error-rate-in-the-context)) |
 | `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10` | Minimum requests per interval before an error rate is published |
 | `OTEL_SEMCONV_STABILITY_OPT_IN` | -       | Set to `http` so the HTTP instrumentation emits `http.server.request.duration` with `error.type` |
-| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback ratio for `traceSampleRatio`; `always_off` / `parentbased_always_off` are hard floors no flag overrides; the sampler is parent-based and custom samplers are not loaded |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback ratio for `traceSampleRatio`; `always_off` is a hard floor no flag overrides; `parentbased_always_off` starts no trace locally but follows sampled parents (see [Sampling](#sampling-tracesampleratio)); the sampler is parent-based and custom samplers are not loaded |
 
 The `telemetryLevel` (variants `FULL`/`IO`/`OFF`) and `otelEnabled` (boolean)
 flags should exist in whatever flagd instance `FLAGD_HOST`/`FLAGD_PORT` point
 at - a missing one simply falls back to its startup value. See
 [poc-otelfeature/src/flagd](https://github.com/OTelFeature/poc/tree/main/src/flagd)
 for an example flag definition.
+
+Which `OTEL_*` variables a flag can replace live, which cannot (and why), and
+the two hard floors are listed in the poc README:
+[Which `OTEL_*` env vars can be live flags](https://github.com/OTelFeature/poc#which-otel_-env-vars-can-be-live-flags).
 
 ## Development
 
