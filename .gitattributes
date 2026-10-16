@@ -1,0 +1,6 @@
+# Files executed inside Linux containers or by make must keep LF, even in
+# Windows checkouts with core.autocrlf=true.
+Makefile text eol=lf
+ci/** text eol=lf
+*.sh text eol=lf
+.dockerignore text eol=lf

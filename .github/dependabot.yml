@@ -68,3 +68,17 @@ updates:
     commit-message:
       prefix: "ci"
       include: "scope"
+
+  # The toolchain image's base (ci/Dockerfile): tag and digest move together.
+  - package-ecosystem: "docker"
+    directory: "/ci"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

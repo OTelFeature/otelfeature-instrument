@@ -550,6 +550,31 @@ at - a missing one simply falls back to its startup value. See
 [poc-otelfeature/src/flagd](https://github.com/OTelFeature/poc/tree/main/src/flagd)
 for an example flag definition.
 
+## Development
+
+Everything runs in the toolchain image built from
+[`ci/Dockerfile`](ci/Dockerfile) - Python, uv and every locked dependency.
+The only host requirement is Docker (on Windows: run `make` in WSL).
+
+```sh
+make test    # build the image (cached), run the test suite in it
+make shell   # an interactive shell in the image, with the checkout mounted
+```
+
+The checkout is mounted at `/workspace` and imported from `src/`, so edits
+need no rebuild; only changes to `pyproject.toml` / `uv.lock` rebuild the
+dependency layer. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
+builds the same image with GitHub Actions layer caching and runs the same
+`make test-only`, on every pull request and on `main`.
+
+- The container runs as root. `make test` writes nothing into the checkout,
+  but commands you run in `make shell` (e.g. a bare `pytest`, which leaves a
+  `.pytest_cache`) can leave root-owned files on a Linux filesystem.
+- Only Python 3.12 is tested, although `requires-python` is `>=3.10`.
+- The image doesn't install the project itself (tests import it from
+  `src/`), so the `otelfeature-instrument` console script isn't available in
+  `make shell`.
+
 ## Known limitations
 
 ### `OFF` leaves gaps in traces
