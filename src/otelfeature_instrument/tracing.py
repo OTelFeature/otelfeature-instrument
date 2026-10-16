@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
+import os
 from logging import getLogger
 from typing import Any, Iterator, Mapping
 
@@ -37,6 +38,7 @@ from otelfeature_instrument.evaluation_context import (
     span_context,
     tracer_context,
 )
+from otelfeature_instrument.exporters import exporter_disabled
 from otelfeature_instrument.flags import (
     TelemetryPolicy,
     cached_policy,
@@ -391,7 +393,23 @@ class _VerbosityAwareTracerProvider(TracerProvider):
         )
 
 
+TRACES_EXPORTER_ENV_VAR = "OTEL_TRACES_EXPORTER"
+
+
+def traces_disabled(environ: Mapping[str, str] = os.environ) -> bool:
+    """`OTEL_TRACES_EXPORTER=none` switches span export off (see exporters.py)."""
+    return exporter_disabled(TRACES_EXPORTER_ENV_VAR, environ)
+
+
 def install_tracer_provider(resource: Resource) -> None:
+    # The provider and the verbosity wrapper are installed either way: they
+    # keep context propagation and the flag policy working. `none` only
+    # leaves out the exporter, as the Java agent's autoconfigure does.
     provider = SDKTracerProvider(resource=resource, sampler=flag_aware_sampler())
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    if traces_disabled():
+        _logger.info(
+            "otelfeature-instrument: %s=none - spans are not exported", TRACES_EXPORTER_ENV_VAR
+        )
+    else:
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     trace.set_tracer_provider(_VerbosityAwareTracerProvider(provider))

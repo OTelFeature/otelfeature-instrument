@@ -16,6 +16,7 @@ from otelfeature_instrument.error_rate import (
     interval_from_environment,
     min_requests_from_environment,
 )
+from otelfeature_instrument.exporters import exporter_disabled
 
 _logger = getLogger(__name__)
 
@@ -23,22 +24,8 @@ METRICS_EXPORTER_ENV_VAR = "OTEL_METRICS_EXPORTER"
 
 
 def metrics_disabled(environ: Mapping[str, str] = os.environ) -> bool:
-    """`OTEL_METRICS_EXPORTER=none` switches metrics off - parsed as the SDK
-    does (`value.lower().strip() == "none"`). Any other value keeps the OTLP
-    exporter: this launcher doesn't select exporters, it only honours `none`.
-    """
-    value = environ.get(METRICS_EXPORTER_ENV_VAR, "").lower().strip()
-    if value == "none":
-        return True
-    if "none" in {name.strip() for name in value.split(",")}:
-        # The SDK rejects this; Java autoconfigure treats it as an error.
-        _logger.warning(
-            "otelfeature-instrument: %s=%r mixes 'none' with exporters - "
-            "metrics stay on; set exactly 'none' to switch them off",
-            METRICS_EXPORTER_ENV_VAR,
-            value,
-        )
-    return False
+    """`OTEL_METRICS_EXPORTER=none` switches metrics off (see exporters.py)."""
+    return exporter_disabled(METRICS_EXPORTER_ENV_VAR, environ)
 
 
 def install_meter_provider(resource: Resource) -> None:

@@ -537,6 +537,7 @@ can close the loop on its own - no outside script, no new metric:
 | `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
 | `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
 | `OTELFEATURE_OPENFEATURE_TRACING_HOOK` | `false` | `true` records the extension's own flag evaluations as span events (needs the `tracing-hook` extra; adds an event per targeted evaluation) |
+| `OTEL_TRACES_EXPORTER`        | `otlp`     | `none` exports no spans. The tracer provider, flag policy and context propagation keep working (spans are still started, so `traceparent` flows downstream), as with the Java agent. Only `none` is recognised; any other value still exports via OTLP/HTTP |
 | `OTEL_METRICS_EXPORTER`       | `otlp`     | `none` installs no meter provider at all - and so no error rate. Only `none` is recognised; any other value still exports via OTLP/HTTP |
 | `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections (see [Error rate](#error-rate-in-the-context)) |
 | `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10` | Minimum requests per interval before an error rate is published |
