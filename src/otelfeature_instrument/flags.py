@@ -158,9 +158,9 @@ def enable_tracing_hook(environ: Mapping[str, str] = os.environ) -> bool:
 
     Recording which flag evaluated to what is the hook's job, not the
     extension's: it never writes `feature_flag.*` itself. Off by default, on
-    purpose: with targeted flags the extension evaluates per span, so the
-    hook adds a `feature_flag.evaluation` event per span - exactly the kind
-    of noise this project exists to remove. Recording the application's own
+    purpose: targeted (or erroring) flags are evaluated per span start, so the
+    hook adds a `feature_flag.evaluation` event per such flag per span -
+    exactly the kind of noise this project exists to remove. Recording the application's own
     flag evaluations is the application's business (it registers the hook
     itself); this only covers the extension's.
 

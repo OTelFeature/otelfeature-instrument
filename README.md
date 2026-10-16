@@ -337,11 +337,13 @@ flags.
 For the extension's own evaluations it can be switched on with
 `OTELFEATURE_OPENFEATURE_TRACING_HOOK=true` (install
 `otelfeature-instrument[tracing-hook]`). It is **off by default on
-purpose**: static flags are not evaluated at all, but a flag with
-targeting is evaluated per span, and each evaluation adds a
-`feature_flag.evaluation` event. That is up to one event per span on a
-busy service: exactly the noise this project removes. Use it to debug a
-rule, not permanently.
+purpose**: a static flag is not evaluated per span, but a flag with
+targeting - or one in an error state, e.g. during a flagd outage - is, and
+each evaluation adds a `feature_flag.evaluation` event: one per such flag
+per span start, so up to three on a child's parent (`otelEnabled`,
+`telemetryLevel`, `recordSpan`) plus one per root for `traceSampleRatio`.
+On a busy service that is exactly the noise this project removes. Use it to
+debug a rule, not permanently.
 
 Where the events land: on the span that is current while the flag is
 evaluated - the **parent** of the span being decided, since that span

@@ -133,6 +133,14 @@ def test_the_hook_records_nothing_for_plain_roots(flagd, hook_options):
     assert len(spans) == 5
     assert all(_events(span) == [] for span in spans)
 
+    # Positive control: the hook is attached - a root started while another
+    # span is current puts its event there.
+    exporter.clear()
+    with tracer.start_as_current_span("outer", kind=trace.SpanKind.SERVER):
+        tracer.start_span("inner-root", context=trace.set_span_in_context(trace.INVALID_SPAN)).end()
+    outer = next(s for s in exporter.get_finished_spans() if s.name == "outer")
+    assert [e.attributes["feature_flag.key"] for e in _events(outer)] == [SAMPLE_RATIO_FLAG_KEY]
+
 
 def test_the_hook_does_not_record_errors_as_exceptions(hook_options):
     pytest.importorskip("openfeature.contrib.hook.opentelemetry")
@@ -151,7 +159,21 @@ def test_without_the_package_opting_in_warns_and_stays_off(hook_options, monkeyp
             raise ImportError(name)
         return real_import(name, *args, **kwargs)
 
+    flags._hook_options = ("previously on",)  # must end up off
     monkeypatch.setattr(builtins, "__import__", no_hook_package)
 
     assert flags.enable_tracing_hook({flags.TRACING_HOOK_ENV_VAR: "true"}) is False
+    assert flags._hook_options == ()
     assert "openfeature-hooks-opentelemetry is not installed" in caplog.text
+
+
+def test_configure_feature_flags_reads_the_opt_in(hook_options, monkeypatch):
+    pytest.importorskip("openfeature.contrib.hook.opentelemetry")
+    monkeypatch.setenv(flags.TRACING_HOOK_ENV_VAR, "true")
+    monkeypatch.setenv(flags.FLAG_PROVIDER_ENV_VAR, "none")
+    monkeypatch.setattr(flags, "_handlers_registered", True)  # don't touch the event bus
+
+    flags.configure_feature_flags()
+
+    (options,) = flags._hook_options
+    assert type(options.hooks[0]).__name__ == "TracingHook"
