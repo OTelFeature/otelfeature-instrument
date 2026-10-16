@@ -392,9 +392,9 @@ def test_real_flagd_reports_static_for_an_untargeted_flag(flagd_provider):
 
 
 def test_real_flagd_reports_targeting_match_for_a_targeted_flag(
-    flag_file: Path, flagd_provider
+    flag_file: Path, flagd_provider, write_flags
 ):
-    flag_file.write_text(json.dumps(TARGETED_FLAGS), encoding="utf-8")
+    write_flags(flag_file, TARGETED_FLAGS)
 
     def targeted() -> bool:
         details = feature_api.get_client().get_string_details(
@@ -408,7 +408,7 @@ def test_real_flagd_reports_targeting_match_for_a_targeted_flag(
 
 
 def test_real_flagd_drives_the_switch_between_cached_and_per_span(
-    flag_file: Path, flagd_provider
+    flag_file: Path, flagd_provider, write_flags
 ):
     """The whole feature, end to end, against a real provider."""
     resolver = _VerbosityResolver()
@@ -426,7 +426,7 @@ def test_real_flagd_drives_the_switch_between_cached_and_per_span(
 
         # Adding targeting must switch caching off, driven purely by the
         # configuration-changed event flagd emits when the file changes.
-        flag_file.write_text(json.dumps(TARGETED_FLAGS), encoding="utf-8")
+        write_flags(flag_file, TARGETED_FLAGS)
         assert _wait_for(lambda: resolver.cached is None), "caching never switched off"
 
         # ... and now the value genuinely follows the evaluation context.
@@ -435,7 +435,7 @@ def test_real_flagd_drives_the_switch_between_cached_and_per_span(
         assert resolver.cached is None
 
         # Remove the targeting again and caching resumes on its own.
-        flag_file.write_text(json.dumps(STATIC_FLAGS), encoding="utf-8")
+        write_flags(flag_file, STATIC_FLAGS)
         assert _wait_for(
             lambda: resolver.cached == VERBOSITY_FULL
         ), "caching did not resume once targeting was removed"
@@ -537,18 +537,18 @@ def _with_otel_enabled(flag: dict) -> dict:
     return {**STATIC_FLAGS, "flags": {**STATIC_FLAGS["flags"], OTEL_ENABLED_FLAG_KEY: flag}}
 
 
-def test_real_flagd_static_otel_enabled_false_is_cached(flag_file: Path, flagd_provider):
-    flag_file.write_text(
-        json.dumps(
-            _with_otel_enabled(
-                {
-                    "state": "ENABLED",
-                    "defaultVariant": "off",
-                    "variants": {"on": True, "off": False},
-                }
-            )
+def test_real_flagd_static_otel_enabled_false_is_cached(
+    flag_file: Path, flagd_provider, write_flags
+):
+    write_flags(
+        flag_file,
+        _with_otel_enabled(
+            {
+                "state": "ENABLED",
+                "defaultVariant": "off",
+                "variants": {"on": True, "off": False},
+            }
         ),
-        encoding="utf-8",
     )
     resolver = _EnabledResolver()
     feature_api.add_handler(ProviderEvent.PROVIDER_CONFIGURATION_CHANGED, resolver.classify)
@@ -561,19 +561,19 @@ def test_real_flagd_static_otel_enabled_false_is_cached(flag_file: Path, flagd_p
         )
 
 
-def test_real_flagd_non_boolean_otel_enabled_fails_open(flag_file: Path, flagd_provider):
+def test_real_flagd_non_boolean_otel_enabled_fails_open(
+    flag_file: Path, flagd_provider, write_flags
+):
     """A string-valued `otelEnabled` is a type mismatch: the SDK serves our `True`."""
-    flag_file.write_text(
-        json.dumps(
-            _with_otel_enabled(
-                {
-                    "state": "ENABLED",
-                    "defaultVariant": "off",
-                    "variants": {"on": "true", "off": "false"},
-                }
-            )
+    write_flags(
+        flag_file,
+        _with_otel_enabled(
+            {
+                "state": "ENABLED",
+                "defaultVariant": "off",
+                "variants": {"on": "true", "off": "false"},
+            }
         ),
-        encoding="utf-8",
     )
 
     def loaded() -> bool:
@@ -585,7 +585,7 @@ def test_real_flagd_non_boolean_otel_enabled_fails_open(flag_file: Path, flagd_p
 
 
 def test_real_flagd_missing_otel_enabled_is_cached_until_it_is_created(
-    flag_file: Path, flagd_provider
+    flag_file: Path, flagd_provider, write_flags
 ):
     """The upgrade path: no `otelEnabled` yet, then someone adds it in flagd."""
     resolver = _EnabledResolver()
@@ -594,17 +594,15 @@ def test_real_flagd_missing_otel_enabled_is_cached_until_it_is_created(
     try:
         assert _wait_for(lambda: resolver.cached is True), "missing flag never cached"
 
-        flag_file.write_text(
-            json.dumps(
-                _with_otel_enabled(
-                    {
-                        "state": "ENABLED",
-                        "defaultVariant": "off",
-                        "variants": {"on": True, "off": False},
-                    }
-                )
+        write_flags(
+            flag_file,
+            _with_otel_enabled(
+                {
+                    "state": "ENABLED",
+                    "defaultVariant": "off",
+                    "variants": {"on": True, "off": False},
+                }
             ),
-            encoding="utf-8",
         )
         assert _wait_for(
             lambda: resolver.cached is False

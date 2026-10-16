@@ -159,7 +159,7 @@ def test_a_muted_instrumentation_is_decided_once_per_tracer(flagd, level_evaluat
     assert all(context.targeting_key is None for context in level_evaluations)
 
 
-def test_a_ruleset_change_re_decides_every_tracer(flagd, level_evaluations):
+def test_a_ruleset_change_re_decides_every_tracer(flagd, level_evaluations, write_flags):
     path = flagd(_ruleset(_if(_eq("otel.scope.name", "noisy.instrumentation"))))
     exporter = InMemorySpanExporter()
     noisy = _provider(exporter).get_tracer("noisy.instrumentation")
@@ -167,7 +167,7 @@ def test_a_ruleset_change_re_decides_every_tracer(flagd, level_evaluations):
     assert exporter.get_finished_spans() == ()
 
     generation = flags._policy_source.generation
-    path.write_text(json.dumps(_ruleset(_if(_eq("otel.scope.name", "something.else")))), encoding="utf-8")
+    write_flags(path, _ruleset(_if(_eq("otel.scope.name", "something.else"))))
     deadline = time.monotonic() + 10
     while flags._policy_source.generation == generation and time.monotonic() < deadline:
         time.sleep(0.02)
