@@ -18,7 +18,7 @@ from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from otelfeature_instrument import error_rate, evaluation_context, flags, metrics
+from otelfeature_instrument import error_rate, evaluation_context, exporters, flags, metrics
 from otelfeature_instrument.error_rate import (
     ERROR_RATE_KEY,
     ErrorRatePublisher,
@@ -430,6 +430,6 @@ def test_metrics_disabled(environ, disabled):
 
 
 def test_none_mixed_with_exporters_warns(caplog):
-    with caplog.at_level("WARNING", logger=metrics.__name__):
+    with caplog.at_level("WARNING", logger=exporters.__name__):
         assert metrics.metrics_disabled({"OTEL_METRICS_EXPORTER": "otlp, none"}) is False
     assert "mixes 'none' with exporters" in caplog.text
