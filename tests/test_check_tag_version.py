@@ -61,19 +61,36 @@ def test_a_stale_dunder_version_fails(tmp_path):
     assert check_tag_version.check("v0.3.0", _project(tmp_path, dunder="0.1.0"))[0] == 1
 
 
-def test_a_missing_version_fails(tmp_path):
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+@pytest.mark.parametrize("version_line", ["", 'version = ""\n'])
+def test_a_missing_version_fails(tmp_path, capsys, version_line):
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\n' + version_line, encoding="utf-8"
+    )
     assert check_tag_version.check("v", tmp_path)[0] == 1
+    assert "no project.version" in capsys.readouterr().err
 
 
 def test_the_repository_itself_is_consistent():
-    """pyproject.toml and __version__ agree, so the release tag can pass."""
+    """pyproject.toml, __version__ and uv.lock agree, so the release tag can pass."""
     root = Path(__file__).parents[1]
-    version = check_tag_version.tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    tomllib = check_tag_version.tomllib
+    version = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
     assert check_tag_version.check(f"v{version}", root) == (0, False)
+    lock = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))
+    (locked,) = [p["version"] for p in lock["package"] if p["name"] == "otelfeature-instrument"]
+    assert locked == version, "uv.lock is stale - run uv lock after the version bump"
 
 
 def test_main_prints_the_prerelease_output(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(_project(tmp_path))
     assert check_tag_version.main(["x", "v0.3.0-rc.1"]) == 0
     assert capsys.readouterr().out == "prerelease=true\n"
+
+
+def test_a_failing_tag_writes_nothing_to_stdout(tmp_path, monkeypatch, capsys):
+    """stdout goes to $GITHUB_OUTPUT: a failure must not leave a value there."""
+    monkeypatch.chdir(_project(tmp_path))
+    assert check_tag_version.main(["x", "v0.3.1"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "neither v0.3.0 nor v0.3.0-rc.N" in captured.err
