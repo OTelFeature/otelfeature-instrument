@@ -6,7 +6,7 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
-    "openfeature-provider-flagd==0.5.2",
+    "openfeature-provider-flagd==0.6.0",
     "openfeature-sdk==0.10.0",
     # NOTE: opentelemetry-* packages release in lockstep and are pinned
     # exactly. They can't be updated individually, so Dependabot ignores
