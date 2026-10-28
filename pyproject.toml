@@ -1,6 +1,6 @@
 [project]
 name = "otelfeature-instrument"
-version = "0.3.0"
+version = "0.4.0"
 description = "Zero-code OpenTelemetry launcher with live, flagd-controlled internal-span suppression"
 readme = "README.md"
 license = "Apache-2.0"

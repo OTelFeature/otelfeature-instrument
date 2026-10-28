@@ -614,7 +614,7 @@ To depend on a release, pin the git tag, e.g. with uv:
 
 ```toml
 [tool.uv.sources]
-otelfeature-instrument = { git = "https://github.com/OTelFeature/otelfeature-instrument", tag = "v0.3.0" }
+otelfeature-instrument = { git = "https://github.com/OTelFeature/otelfeature-instrument", tag = "v0.4.0" }
 ```
 
 ## Known limitations
