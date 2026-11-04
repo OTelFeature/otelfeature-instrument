@@ -4,12 +4,6 @@ A zero-code OpenTelemetry launcher, like `opentelemetry-instrument`, but with
 one addition: **`INTERNAL` spans - or all tracing - can be suppressed live,
 via a feature flag, with no application restart.**
 
-> From the KubeCon + CloudNativeCon North America 2026 talk
-> **OpenFeature as a Control Plane for OpenTelemetry** by Simon Schrottner
-> ([Flagsmith](https://www.flagsmith.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)) and Juliano Costa
-> ([Dash0](https://www.dash0.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)). Slides, recording and how to
-> reach us: **[otelfeature.github.io/presentation](https://otelfeature.github.io/presentation/)**
-
 ```sh
 otelfeature-instrument uvicorn main:app --host 0.0.0.0 --port 8000
 ```
@@ -43,6 +37,13 @@ metrics keep flowing either way, on purpose.
 Suppressed spans' children reattach to the real parent instead of being
 orphaned. See [How it works](#how-it-works) for why that's not simply a
 `Sampler`.
+
+> From the KubeCon + CloudNativeCon North America 2026 talk
+> **OpenFeature as a Control Plane for OpenTelemetry** by Simon Schrottner
+> ([Flagsmith](https://www.flagsmith.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)) and Juliano Costa
+> ([Dash0](https://www.dash0.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)). The talk page has how to
+> reach us, and the slides and recording once they're out:
+> **[otelfeature.github.io/presentation](https://otelfeature.github.io/presentation/)**
 
 ## Why this exists
 
@@ -670,5 +671,5 @@ fits your setup:
 
 - [Open an issue](https://github.com/OTelFeature/otelfeature-instrument/issues/new)
 - CNCF Slack ([invite](https://slack.cncf.io)): `#openfeature` and `#opentelemetry`
-- [Simon Schrottner](https://schrottner.at) ([Flagsmith](https://www.flagsmith.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)) and
-  [Juliano Costa](https://jcosta.dev) ([Dash0](https://www.dash0.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument))
+- The speakers' websites: [Simon Schrottner](https://schrottner.at) and
+  [Juliano Costa](https://jcosta.dev)
