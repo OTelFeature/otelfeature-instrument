@@ -9,8 +9,8 @@ otelfeature-instrument uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 Everything else works as with `opentelemetry-instrument`: resource
-detection, OTLP export, zero-code instrumentation of the installed
-libraries. No code changes in the application. Manual spans the application
+detection, OTLP export, zero-code instrumentation of the libraries whose
+`opentelemetry-instrumentation-*` packages are installed. No code changes in the application. Manual spans the application
 creates are covered too.
 
 > From the KubeCon + CloudNativeCon North America 2026 talk
@@ -22,14 +22,23 @@ creates are covered too.
 
 ## Usage
 
-There is no PyPI package yet. Depend on a
-[GitHub release](https://github.com/OTelFeature/otelfeature-instrument/releases)
-by its git tag, e.g. with uv:
+There is no PyPI package yet. Install the wheel of a
+[GitHub release](https://github.com/OTelFeature/otelfeature-instrument/releases):
 
-```toml
-[tool.uv.sources]
-otelfeature-instrument = { git = "https://github.com/OTelFeature/otelfeature-instrument", tag = "v0.4.0" }
+```sh
+pip install https://github.com/OTelFeature/otelfeature-instrument/releases/download/v0.4.0/otelfeature_instrument-0.4.0-py3-none-any.whl
 ```
+
+or depend on its git tag with uv, which writes both the dependency and the
+`[tool.uv.sources]` entry (a git source needs `git` in the build image):
+
+```sh
+uv add git+https://github.com/OTelFeature/otelfeature-instrument --tag v0.4.0
+```
+
+Also install the instrumentation packages for your libraries, e.g.
+`opentelemetry-instrumentation-fastapi`, at the version of the pinned
+`opentelemetry-instrumentation` (`0.66b1` in v0.4.0).
 
 Then run the application through the launcher instead of directly (or
 instead of `opentelemetry-instrument`):
@@ -126,9 +135,10 @@ the `false` variant.
 - **An incoming request counts as a root.** A `SERVER` or `CONSUMER` span
   with a remote parent drops the request here and sends `sampled=0`
   downstream, so the trace ends at the caller.
-- This needs a **parent-based sampler**, here and downstream (the SDK
-  default). With `OTEL_TRACES_SAMPLER=always_on` or `traceidratio` the
-  children are sampled anyway, parented to a span that is never exported.
+- Downstream services need a **parent-based sampler** (the SDK default).
+  A downstream service with `always_on` or `traceidratio` samples the
+  children anyway, parented to a span that is never exported. This launcher
+  always applies its sampler parent-based.
 - `recordSpan=true` never re-enables what `OFF` or `otelEnabled=false`
   turned off. The key can be renamed with `OTELFEATURE_RECORD_SPAN_FLAG_NAME`.
 
@@ -209,7 +219,9 @@ The full contract is in the spec:
 A flag without `targeting` (flagd reason `STATIC`) or a missing flag is
 evaluated once and answered from memory until the ruleset changes. A flag
 with targeting is evaluated per span. Adding or removing targeting switches
-between the two, with no restart.
+between the two, with no restart. With `OTELFEATURE_FLAG_PROVIDER=none`, your
+provider must emit `PROVIDER_CONFIGURATION_CHANGED` when flags change, or
+static flags keep their first value.
 
 Rough per-span cost, from `uv run python benchmarks/span_cost.py` (one
 `SERVER` span with two attributes and one `INTERNAL` child, no export;
@@ -259,6 +271,7 @@ instrumentation scope. DEBUG logging for `otelfeature_instrument` logs every
 scope a tracer is created for:
 
 ```python
+logging.basicConfig()
 logging.getLogger("otelfeature_instrument").setLevel(logging.DEBUG)
 # otelfeature-instrument: tracer for otel.scope.name='opentelemetry.instrumentation.fastapi' ...
 ```
@@ -304,6 +317,7 @@ as `feature_flag.evaluation` events. It is off by default: every
 non-cached evaluation adds an event. The events land on the span current at
 evaluation time, i.e. the **parent** of the span being decided; decisions
 for new roots, including every `traceSampleRatio` decision, record nothing.
+Evaluation errors are not recorded as exceptions.
 
 ## Configuration
 
