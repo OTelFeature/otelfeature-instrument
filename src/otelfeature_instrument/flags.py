@@ -20,8 +20,9 @@ unreachable or a flag undefined the behaviour is that of plain
 Each flag is evaluated once while static and per span once it carries
 targeting, with the classification redone on provider events. See
 "Decision cost" in the README for the user-facing behaviour. A STATIC answer
-(or FLAG_NOT_FOUND) is kept until the next provider event (`_RECLASSIFY_ON`); every other reason may depend on the context, so it is evaluated
-per span. The comments below cover the local decisions only.
+(or FLAG_NOT_FOUND) is kept until the next provider event
+(`_RECLASSIFY_ON`); every other reason may depend on the context, so it is
+evaluated per span. The comments below cover the local decisions only.
 """
 
 from __future__ import annotations
