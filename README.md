@@ -1,42 +1,17 @@
 # otelfeature-instrument
 
-A zero-code OpenTelemetry launcher, like `opentelemetry-instrument`, but with
-one addition: **`INTERNAL` spans - or all tracing - can be suppressed live,
-via a feature flag, with no application restart.**
+A zero-code OpenTelemetry launcher, like `opentelemetry-instrument`, with one
+addition: [OpenFeature](https://openfeature.dev/) flags decide, live and
+without a restart, which spans get created and which traces are sampled.
 
 ```sh
 otelfeature-instrument uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-Add it as a dependency, change your `CMD`/entrypoint to run through
-`otelfeature-instrument` instead of your app directly (or instead of
-`opentelemetry-instrument`), and everything else - resource detection, OTLP
-export, zero-code instrumentation of installed libraries - works the same as
-`opentelemetry-instrument`. The one difference: two
-[OpenFeature](https://openfeature.dev/) flags decide which spans get created,
-re-read live:
-
-| Flag             | Value   | Effect on spans                                           |
-|------------------|---------|-----------------------------------------------------------|
-| `telemetryLevel` | `FULL`  | everything is traced (default)                            |
-| `telemetryLevel` | `IO`    | `INTERNAL` spans suppressed; `SERVER`/`CLIENT`/`PRODUCER`/`CONSUMER` kept |
-| `telemetryLevel` | `OFF`   | every span suppressed                                     |
-| `otelEnabled`    | `true`  | no effect, `telemetryLevel` decides (default)             |
-| `otelEnabled`    | `false` | every span suppressed - identical to `telemetryLevel=OFF` |
-| `recordSpan`     | `false` | the span is dropped - per span when a targeting rule decides it (see [Dropping selected spans](#dropping-selected-spans-recordspan)) |
-| `traceSampleRatio` | `0.0`-`1.0` | probability a new trace is sampled - a live `OTEL_TRACES_SAMPLER_ARG` (see [Sampling](#sampling-tracesampleratio)) |
-
-`otelEnabled` is the plain on/off switch; `OFF` is the same thing for
-operators who already manage `telemetryLevel`. Both **fail open**: a missing
-flag, a provider error, an unknown `telemetryLevel` variant or a non-boolean
-`otelEnabled` all fall back to what the process would do without
-OTelFeature - `FULL`/`true` unless the environment says otherwise (see
-[One policy, one read](#one-policy-one-read)). Both cover **traces only** -
-metrics keep flowing either way, on purpose.
-
-Suppressed spans' children reattach to the real parent instead of being
-orphaned. See [How it works](#how-it-works) for why that's not simply a
-`Sampler`.
+Everything else works as with `opentelemetry-instrument`: resource
+detection, OTLP export, zero-code instrumentation of the installed
+libraries. No code changes in the application. Manual spans the application
+creates are covered too.
 
 > From the KubeCon + CloudNativeCon North America 2026 talk
 > **OpenFeature as a Control Plane for OpenTelemetry** by Simon Schrottner
@@ -45,380 +20,200 @@ orphaned. See [How it works](#how-it-works) for why that's not simply a
 > reach us, and the slides and recording once they're out:
 > **[otelfeature.github.io/presentation](https://otelfeature.github.io/presentation/)**
 
-## Why this exists
-
-This started as a prototype directly inside one service (see
-[poc-otelfeature](https://github.com/OTelFeature/poc)): most `INTERNAL`
-spans are connective tissue between the actual I/O boundaries (`SERVER`,
-`CLIENT`, `PRODUCER`, `CONSUMER`) a trace cares about - useful in detail, but
-frequently just noise once a system is understood. This package makes that
-verbosity control a reusable, install-and-go capability instead of
-per-service boilerplate.
-
 ## Usage
 
-```sh
-uv add otelfeature-instrument
+There is no PyPI package yet. Depend on a
+[GitHub release](https://github.com/OTelFeature/otelfeature-instrument/releases)
+by its git tag, e.g. with uv:
+
+```toml
+[tool.uv.sources]
+otelfeature-instrument = { git = "https://github.com/OTelFeature/otelfeature-instrument", tag = "v0.4.0" }
 ```
+
+Then run the application through the launcher instead of directly (or
+instead of `opentelemetry-instrument`):
 
 ```dockerfile
 CMD ["sh", "-c", "exec otelfeature-instrument uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
 ```
 
-No code changes required in the target application - the same zero-code
-promise `opentelemetry-instrument` makes. If the application creates its own
-manual spans (e.g. `tracer.start_as_current_span("some.internal.op",
-kind=SpanKind.INTERNAL)`), those are covered too, not just spans created by
-auto-instrumentation.
+## Flags
+
+| Flag               | Value         | Effect on spans                                           |
+|--------------------|---------------|-----------------------------------------------------------|
+| `telemetryLevel`   | `FULL`        | everything is traced (default)                            |
+| `telemetryLevel`   | `IO`          | `INTERNAL` spans suppressed; `SERVER`/`CLIENT`/`PRODUCER`/`CONSUMER` kept |
+| `telemetryLevel`   | `OFF`         | every span suppressed                                     |
+| `otelEnabled`      | `true`/`false`| `false` is the same as `telemetryLevel=OFF` (default `true`) |
+| `recordSpan`       | `true`/`false`| `false` drops the span a targeting rule matches (see [below](#dropping-selected-spans-recordspan)) |
+| `traceSampleRatio` | `0.0`-`1.0`   | probability a new trace is sampled, a live `OTEL_TRACES_SAMPLER_ARG` (see [Sampling](#sampling-tracesampleratio)) |
+
+All flags **fail open**: a missing flag, a provider error, an unknown
+`telemetryLevel` value or a value of the wrong type falls back to what the
+process would do without OTelFeature (see
+[One policy, one read](#one-policy-one-read)). The flags cover **traces
+only**. Metrics keep flowing either way.
+
+An example flag definition is in
+[poc/src/flagd](https://github.com/OTelFeature/poc/tree/main/src/flagd).
 
 ## How it works
 
-### The launcher mechanism
+[cli.py](src/otelfeature_instrument/cli.py) works like
+`opentelemetry-instrument`: it prepends this package's directory to
+`PYTHONPATH` and `exec`s the command. Python imports
+[sitecustomize.py](src/otelfeature_instrument/sitecustomize.py) at startup,
+so [bootstrap.py](src/otelfeature_instrument/bootstrap.py) runs before the
+application's code, and it instruments the installed libraries through
+`opentelemetry-instrumentation`'s own entry-point discovery.
 
-Identical to `opentelemetry-instrument`: [cli.py](src/otelfeature_instrument/cli.py)
-prepends this package's own directory to `PYTHONPATH` (where
-[sitecustomize.py](src/otelfeature_instrument/sitecustomize.py) lives) and
-`exec`s the target command. Python's `site` module auto-imports
-`sitecustomize` at interpreter startup, so
-[bootstrap.py](src/otelfeature_instrument/bootstrap.py)'s `initialize()` runs
-*before* the target application's own code is ever imported. `initialize()`
-then reuses `opentelemetry-instrumentation`'s own entry-point discovery
-(`_load_distro`/`_load_instrumentors`) to zero-code-instrument whatever
-instrumentation packages (`opentelemetry-instrumentation-fastapi`, etc.) are
-installed - the exact same mechanism `opentelemetry-instrument` uses for
-that part.
+[tracing.py](src/otelfeature_instrument/tracing.py) wraps the real
+`Tracer`. A suppressed span is never created: `start_span` and
+`start_as_current_span` hand back the current (or explicitly passed) parent.
+Its children therefore attach to the real parent and are not orphaned. A
+`Sampler` can't do this: by the time it runs, the span's context already
+exists, and dropping the span leaves its children pointing at a parent that
+is never exported. The decision is made once, when the span starts, so a
+flag flip mid-request does not change it. With `telemetryLevel=IO`, a
+`POST /geocode` (`SERVER`) span with `INTERNAL` children and an httpx `GET`
+(`CLIENT`) below them is exported as just `POST /geocode` with `GET` as its
+direct child.
 
-### Suppressing `INTERNAL` spans without orphaning children
+`OFF` and `otelEnabled=false` suppress spans; they don't disable the SDK the
+way `OTEL_SDK_DISABLED` does at startup. Context propagation keeps working
+(see [Known limitations](#off-leaves-gaps-in-traces)), and the SDK, its
+exporters and the instrumentation stay installed. No SDK span is created,
+recorded or exported, so most of the CPU cost goes away. What remains is
+instrumentation glue and the per-span flag lookups.
 
-A `Sampler`-based `DROP` decision happens too late: by the time a `Sampler`
-runs, the span's context has already been minted and handed to its children
-as `parent_span_id`. Dropping it after the fact leaves those children
-pointing at a parent that was never exported - an orphan.
-
-Instead, [tracing.py](src/otelfeature_instrument/tracing.py) wraps the real
-`Tracer`: when verbosity is `IO` and a span's kind is `INTERNAL` (or, under
-`OFF`/`otelEnabled=false`, for every kind), no span is created and context is
-never advanced past the real parent (`start_span`/`start_as_current_span`
-just hand back the current - or explicitly passed - parent unchanged).
-Anything created afterward - however deep in the call stack - inherits that
-same untouched parent, so it attaches directly to it instead of to the
-(nonexistent) suppressed span. The decision
-is made once, at the suppressed span's own creation, so it's stable for that
-span's entire lifetime even if the flag flips mid-request.
-
-Example - a request that would otherwise produce:
-
-```
-POST /geocode                    (SERVER)
-├─ http receive / http send × N  (INTERNAL, from ASGI instrumentation)
-└─ geocode.resolve                (INTERNAL, application code)
-   └─ GET                         (CLIENT, httpx)
-```
-
-produces, with `telemetryLevel=IO`:
-
-```
-POST /geocode      (SERVER)
-└─ GET              (CLIENT, httpx)
-```
-
-### `OFF` is suppression, not an SDK disable
-
-OpenTelemetry's own kill switch, `OTEL_SDK_DISABLED`, is read once at process
-start; `OFF` and `otelEnabled=false` flip at runtime instead, but they are
-not the same thing:
-
-- **Context propagation keeps working.** A suppressed span stands in for
-  the incoming parent (as a non-recording span with the same context) and
-  keeps that parent current, so an incoming `traceparent` is still
-  forwarded downstream and a trace resumes coherently the moment the flag
-  flips back. For an incident-response kill switch that is a feature - but
-  it does leave gaps; see
-  [`OFF` leaves gaps in traces](#off-leaves-gaps-in-traces).
-- **Most of the CPU is saved too, in Python.** Suppression happens at span
-  creation: no SDK span is created, recorded, processed or exported. (This
-  differs from span-processor-based implementations, which still pay for
-  creating the span before dropping it.) What remains is instrumentation
-  glue - extracting headers, building attribute dicts that are written to a
-  no-op span - plus the per-span flag lookups, which are answered from
-  memory while the flags are static or absent.
-- The SDK, its exporters and the instrumentation stay installed.
-
-### The feature flag
-
-[flags.py](src/otelfeature_instrument/flags.py) registers a
-[flagd](https://flagd.dev/) OpenFeature provider in
-["in-process" resolver mode](https://flagd.dev/reference/specifications/in-process-providers/):
-the flag ruleset is synced from flagd once (and kept updated in the
-background over a gRPC stream) and evaluated in memory - no network call on
-the per-span hot path. Editing the flag in flagd takes effect on the very
-next span, with no restart of the instrumented application.
+Flags come from a [flagd](https://flagd.dev/) provider in
+[in-process mode](https://flagd.dev/reference/specifications/in-process-providers/):
+the ruleset is synced over a gRPC stream and evaluated in memory, with no
+network call per span. A flag change applies to the next span.
 
 ### One policy, one read
 
-Enforcement points never read a flag directly. `current_policy()` in
-[flags.py](src/otelfeature_instrument/flags.py) resolves every flag into one
-`TelemetryPolicy` value per decision point:
+[flags.py](src/otelfeature_instrument/flags.py) resolves all flags into one
+`TelemetryPolicy` per decision (`enabled`, `suppress_internal`,
+`record_span`, `sample_ratio`). Each field falls back to its startup value,
+read from the environment once. With flagd unreachable or a flag undefined,
+the behaviour is that of plain `opentelemetry-instrument`.
 
-| Field               | From                                          | Fallback                          |
-|---------------------|-----------------------------------------------|-----------------------------------|
-| `enabled`           | `otelEnabled` and `telemetryLevel != OFF`      | `OTEL_SDK_DISABLED` is not `true` (a hard floor) |
-| `suppress_internal` | `telemetryLevel == IO`                        | `false`                           |
-| `record_span`       | `recordSpan` (only while `enabled`)           | `true`                            |
-| `sample_ratio`      | `traceSampleRatio`; above 1.0 clamped to 1.0  | `OTEL_TRACES_SAMPLER` / `_ARG`, as the SDK reads them (`1.0` by default) |
+Two env vars are **hard floors** that no flag overrides:
+`OTEL_SDK_DISABLED=true` (no flag is evaluated at all) and
+`OTEL_TRACES_SAMPLER=always_off`. Precedence: hard floors >
+`otelEnabled`/`telemetryLevel=OFF` > `recordSpan` > `traceSampleRatio`. The
+field table is in the spec:
+[policy field resolution](https://github.com/OTelFeature/poc/blob/main/docs/spec/entity_model.md#policy-field-resolution)
+and [hard floors](https://github.com/OTelFeature/poc/blob/main/docs/spec/entity_model.md#hard-floors).
 
-**Every field falls back to its startup value**, resolved from the
-environment once when the process starts. With flagd unreachable or a flag
-undefined, behaviour is that of plain `opentelemetry-instrument`; flags are a
-live override, never a replacement.
-
-`OTEL_SDK_DISABLED=true` is the one exception, and a hard floor: flags never
-enable what `OTEL_SDK_DISABLED` turned off. `enabled` stays `false` whatever
-`otelEnabled` or `telemetryLevel` say, and no flag is evaluated at all.
-
-Provider errors and missing flags are logged once when they start - a missing
-flag at `INFO`, anything else at `WARNING` - and once when the flag becomes
+Provider errors and missing flags are logged once when they start (a missing
+flag at `INFO`, anything else at `WARNING`) and once when the flag is
 readable again, never per span.
-
-### Evaluating once, or evaluating always
-
-`telemetryLevel` and `otelEnabled` are each asked about on every single span,
-but most of the time the answer cannot have changed since the last one: a
-flag with no `targeting` block is one `defaultVariant` for the whole world. flagd says so in the
-resolution `reason`, and that reason is the entire mechanism:
-
-| `reason`          | flagd produced it because                        | same for every span? |
-|-------------------|--------------------------------------------------|----------------------|
-| `STATIC`          | flag has no `targeting`, served `defaultVariant`  | yes                  |
-| `TARGETING_MATCH` | `targeting` rules ran and picked a variant        | no                   |
-| `DEFAULT`         | `targeting` rules ran and matched nothing         | no                   |
-| `DISABLED`        | flag `state` is `DISABLED`, served our default    | not worth assuming   |
-| `ERROR`           | flag missing, provider not ready, ...             | not yet knowable     |
-
-So the flag is evaluated **once, from the provider's event handler, without
-an evaluation context**, purely to read the reason back:
-
-- `STATIC` is kept. Every subsequent span is answered from memory,
-  evaluating nothing and running no hooks.
-- So is an `ERROR` whose code is `FLAG_NOT_FOUND`: a deployment that never
-  defined the flag gets the startup fallback from memory instead of a
-  failing evaluation per span. Creating the flag later lists it in the
-  configuration-changed event, which re-classifies.
-- Anything else means the value can depend on who's asking, so every span
-  evaluates for itself.
-
-Each flag is classified independently; while every flag is cached, so is
-the combined `TelemetryPolicy`, and a span costs one attribute read. That
-classification is redone on every `PROVIDER_CONFIGURATION_CHANGED`, so
-attaching a `targeting` block to `telemetryLevel` (or `otelEnabled`) in flagd
-makes the next probe report `TARGETING_MATCH`, caching switches itself off
-for that flag, and spans start being evaluated individually. Remove the
-targeting and caching resumes by itself. No configuration, no restart, no
-code change here.
-
-The event handler is what makes caching safe in the first place: flagd's
-in-process resolver pushes a changed ruleset over its gRPC sync stream, the
-SDK emits the event, and the kept answer is replaced - which is why the
-`rpc`/OFREP resolvers would not do. Handlers run on the SDK's own executor,
-so for a brief moment after startup spans fall through to a direct
-evaluation: the right answer, just not yet the cheap one.
 
 ### Dropping selected spans: `recordSpan`
 
-`otelEnabled` and `telemetryLevel=OFF` drop everything. To drop only the
-spans a rule matches - health checks, one noisy instrumentation - use the
-boolean flag `recordSpan` (default `true`), evaluated against the
-[evaluation context](#the-evaluation-context) of each span:
+`recordSpan` (default `true`) drops only the spans a targeting rule matches,
+for example `service.name == "geocode"` and `url.path == "/health"` serving
+the `false` variant.
 
-```json
-"recordSpan": {
-  "state": "ENABLED", "defaultVariant": "on",
-  "variants": { "on": true, "off": false },
-  "targeting": { "if": [ { "and": [
-      { "==": [ { "var": "service.name" }, "geocode" ] },
-      { "==": [ { "var": "url.path" }, "/health" ] } ] }, "off", null ] }
-}
-```
-
-- **A non-root span** with `recordSpan=false` is suppressed like an `IO`
-  span: never created, its children attach to the nearest kept ancestor.
-- **A root span** (no valid parent, or an incoming request - see below)
-  with `recordSpan=false` drops its
-  **whole trace**: it gets a valid but *non-sampled* span context, so its
-  children aren't sampled either and outgoing calls carry `traceparent`
-  with `sampled=0` - downstream services drop that trace too, instead of
-  each starting a new one (unlike `OFF`, see
-  [Known limitations](#off-leaves-gaps-in-traces)). This relies on
-  **parent-based sampling**, here and downstream: the SDK default
-  (`parentbased_always_on`), and what `otelfeature-instrument` installs. A
-  non-parent-based sampler (`OTEL_TRACES_SAMPLER=always_on` or
-  `traceidratio`) would sample the children anyway, parented to a span that
-  was never exported.
-- **An incoming request counts as a root**, even with a remote parent: a
-  `SERVER` or `CONSUMER` span whose `traceparent` came from another service
-  drops the whole request here, exactly like a root - it gets a non-sampled
-  context in the *caller's* trace, so nothing below it is recorded and
-  outgoing calls carry `sampled=0`. A health check sent by a proxy or
-  gateway that traces its probes therefore leaves no spans in this service.
-  The trade-off: the trace ends at the caller - downstream services see
-  `sampled=0` and record nothing for it either. `INTERNAL` and `CLIENT`
-  spans with a remote parent are suppressed as children; their children
-  attach to the remote parent.
-- **Precedence:** `OTEL_SDK_DISABLED` (hard floor) > `otelEnabled` /
-  `telemetryLevel=OFF` > `recordSpan`. `recordSpan=true` never re-enables
-  anything the global switches turned off.
-- **Fails open:** a missing flag, a provider error or a non-boolean value
-  records the span.
-- **Static costs nothing:** without targeting, `recordSpan` is cached like
-  the other flags; with targeting it is evaluated per span.
-- The key can be renamed with `OTELFEATURE_RECORD_SPAN_FLAG_NAME`.
+- **A non-root span** is suppressed like an `IO` span. Its children attach
+  to the nearest kept ancestor.
+- **A root span drops its whole trace.** It gets a valid, non-sampled
+  context, so its children aren't sampled and outgoing calls carry
+  `sampled=0`. Downstream services drop the trace too.
+- **An incoming request counts as a root.** A `SERVER` or `CONSUMER` span
+  with a remote parent drops the request here and sends `sampled=0`
+  downstream, so the trace ends at the caller.
+- This needs a **parent-based sampler**, here and downstream (the SDK
+  default). With `OTEL_TRACES_SAMPLER=always_on` or `traceidratio` the
+  children are sampled anyway, parented to a span that is never exported.
+- `recordSpan=true` never re-enables what `OFF` or `otelEnabled=false`
+  turned off. The key can be renamed with `OTELFEATURE_RECORD_SPAN_FLAG_NAME`.
 
 ### Sampling: `traceSampleRatio`
 
-`OTEL_TRACES_SAMPLER_ARG` is read once, when the SDK starts. "Turn sampling up
-to 100% for this service for ten minutes" needs it live, so
-`traceSampleRatio` (a float flag, `0.0`-`1.0`) backs the sampler instead:
+`traceSampleRatio` (a float, `0.0`-`1.0`) is the live version of
+`OTEL_TRACES_SAMPLER_ARG`:
 
-- **Parent-based.** A span with a parent follows the parent's decision; only
-  a root asks the flag. A trace is never half sampled, even if the flag
-  flips while it is in flight.
-- **Same rule as the Python SDK's `TraceIdRatioBased`:** the low 64 bits
-  of the trace id, unsigned, against `ratio * 2^64`. Every Python service
-  that applies the same ratio to the same trace makes the same call.
-  **Not across languages:** the Java SDK (and so
-  `otelfeature-java-extension`) compares the low 64 bits as a *signed*
-  long against `ratio * Long.MAX_VALUE`, so at the same ratio Java and
-  Python can disagree on a given trace id. With parent-based sampling this
-  doesn't matter - only the entry service decides, everyone downstream
-  follows its `traceparent`. Where several entry services in different
-  languages must agree on the same traces, bucket with a flagd
-  `fractional` rule on `targetingKey` (the trace id), which every flagd
-  evaluator computes identically, and serve `0.0`/`1.0` per bucket.
-- **`0.0` is `always_off`**, `1.0` is `always_on` - no separate flag needed.
-- **Never throws on the hot path.** A value above 1.0 is clamped to 1.0. A
-  negative value, NaN, infinity or a non-number falls back to the startup
-  ratio, logged once - a negative ratio is far more likely a typo than "drop
-  every trace" (spec: NFR-001, UC-004 A1).
-- **Startup fallback** is the ratio `OTEL_TRACES_SAMPLER`/`_ARG` amount to,
-  parsed as the SDK parses them (`traceidratio` its argument, anything else
-  `1.0`). The sampler itself is parent-based: with a non-parent-based
-  `always_on` or `traceidratio`, a span with a sampled parent is sampled
-  whatever the ratio - logged as a warning at startup.
-- **`always_off` is a hard floor**, like `OTEL_SDK_DISABLED`: flags never
-  enable what the env var switched off. With `OTEL_TRACES_SAMPLER=always_off`
-  nothing is sampled - not by `traceSampleRatio`, not via a sampled upstream
-  parent. With `parentbased_always_off` no trace starts sampled in this
-  service, whatever the flag says; spans with a parent follow it, as the
-  SDK's sampler of that name does. Custom samplers (entry points such
-  as `jaeger_remote`) are not loaded by `otelfeature-instrument` - an
-  unknown name falls back to `1.0`, as the plain SDK provider would.
-- **Only roots evaluate it.** A span with a parent never asks
-  `traceSampleRatio`, so targeting on the ratio costs one evaluation per
-  trace in each service, not one per span.
-- **Targetable** with the [evaluation context](#the-evaluation-context): a
-  ratio per `service.name` or `deployment.environment.name`, or a
-  `fractional` rollout on `targetingKey` - the trace id, so a trace lands in
-  the same bucket in every service.
+- **Parent-based.** Only a root asks the flag; a span with a parent follows
+  the parent. A trace is never half sampled.
+- `0.0` samples nothing and `1.0` everything. A value above 1.0 is clamped
+  to 1.0. A negative value, NaN, infinity or a non-number falls back to the
+  startup ratio, logged once.
+- **Startup ratio** comes from `OTEL_TRACES_SAMPLER`/`_ARG`, parsed as the
+  SDK parses them. `always_off` is a hard floor. With
+  `parentbased_always_off` no trace starts sampled here, but sampled parents
+  are followed. With a non-parent-based `always_on` or `traceidratio`, a
+  span with a sampled parent is sampled whatever the ratio (a warning is
+  logged at startup). Custom samplers such as `jaeger_remote` are not
+  loaded; an unknown name falls back to `1.0`, also with a warning.
+- **Targetable** with the [evaluation context](#the-evaluation-context),
+  e.g. a ratio per `service.name`. It costs one evaluation per trace, not
+  per span.
 
-> **Flip it at the entry point.** Sampling decisions do not apply
-> retroactively or mid-trace: with parent-based sampling, the service that
-> starts the trace decides, and every downstream service follows the
-> decision it receives in `traceparent`. Raising `traceSampleRatio` on a
-> downstream service changes almost nothing - only traces that *start*
-> there. Target the edge service (or use the same rule everywhere).
+> **Flip it at the entry point.** With parent-based sampling, the service
+> that starts the trace decides, and every downstream service follows the
+> `traceparent` it receives. Raising the ratio on a downstream service only
+> affects traces that start there.
 
-**Compared with `jaeger_remote`.** OpenTelemetry already has a remotely
-controlled sampler, `jaeger_remote`, which polls a Jaeger-compatible
-sampling endpoint for per-service and per-operation strategies. It is the
-right choice if you run that infrastructure. `traceSampleRatio` reuses the
-flag infrastructure (flagd, OpenFeature) the organisation already operates
-for everything else, and gets OpenFeature targeting with it: ratios by any
-key in the evaluation context, percentage rollouts, and the same audit trail
-and tooling as every other flag. (OpenTelemetry Python ships no
-`jaeger_remote` sampler, and `otelfeature-instrument` doesn't load sampler
-entry points; the comparison is with the other SDKs and the Collector.)
+**Java and Python can disagree at the same ratio.** This package uses the
+Python SDK's `TraceIdRatioBased` rule (low 64 bits of the trace id,
+unsigned, against `ratio * 2^64`). The Java SDK, and so
+`otelfeature-java-extension`, compares them signed against
+`ratio * Long.MAX_VALUE`. Python services with the same ratio agree on a
+trace id. With parent-based sampling a cross-language difference doesn't
+matter, because only the entry service decides. Where entry services in
+different languages must agree, use a flagd `fractional` rule on
+`targetingKey` (the trace id) and serve `0.0`/`1.0` per bucket: every flagd
+evaluator buckets the same way. Worked example:
+[ratio-parity.md](https://github.com/OTelFeature/poc/blob/main/docs/spec/ratio-parity.md).
 
-### Flag evaluations as span events (opt-in)
-
-The extension records nothing about its decisions on spans - not which
-flag evaluated to what, not the applied ratio. That is the job of the [OpenFeature OpenTelemetry hook](https://github.com/open-feature/python-sdk-contrib/tree/main/hooks/openfeature-hooks-opentelemetry),
-registered by whoever wants it - typically the application, for its own
-flags.
-
-For the extension's own evaluations it can be switched on with
-`OTELFEATURE_OPENFEATURE_TRACING_HOOK=true` (install
-`otelfeature-instrument[tracing-hook]`). It is **off by default on
-purpose**: a static flag is not evaluated per span, but a flag with
-targeting - or one in an error state, e.g. during a flagd outage - is, and
-each evaluation adds a `feature_flag.evaluation` event: one per such flag
-per span start, so up to three on a child's parent (`otelEnabled`,
-`telemetryLevel`, `recordSpan`) plus one per root for `traceSampleRatio`.
-On a busy service that is exactly the noise this project removes. Use it to
-debug a rule, not permanently.
-
-Where the events land: on the span that is current while the flag is
-evaluated - the **parent** of the span being decided, since that span
-doesn't exist yet. So targeted `otelEnabled` / `telemetryLevel` /
-`recordSpan` evaluations for child spans show up on their parent, while
-evaluations for a **new root** - including every `traceSampleRatio`
-evaluation - have no current span and record nothing. Evaluation errors
-are not recorded as exceptions on application spans.
+**Compared with `jaeger_remote`.** OpenTelemetry's `jaeger_remote` sampler
+polls a Jaeger-compatible endpoint for sampling strategies and is the right
+choice if you run that infrastructure. `traceSampleRatio` reuses the flag
+infrastructure you already run (flagd, OpenFeature), with its targeting,
+percentage rollouts, audit trail and tooling. OpenTelemetry Python ships no
+`jaeger_remote` sampler, so the comparison is with the other SDKs and the
+Collector.
 
 ### The evaluation context
 
-When a flag carries `targeting`, each span start is described to it in
-OpenTelemetry semantic-convention terms - so a targeting rule is written
-against the same names as the telemetry itself:
+When a flag has `targeting`, each span start is described in OpenTelemetry
+semantic-convention terms:
 
 | Source                         | Keys |
 |--------------------------------|------|
-| Resource (once per process)    | `service.name`, `service.namespace`, `service.version`, `deployment.environment.name`, `telemetry.sdk.language` |
+| Resource                       | `service.name`, `service.namespace`, `service.version`, `deployment.environment.name`, `telemetry.sdk.language` |
 | Instrumentation scope          | `otel.scope.name`, `otel.scope.version` |
-| Span at start                  | `span.kind` (lower-case: `server`, `client`, `internal`, `producer`, `consumer`), `span.name`, plus every attribute the span is started with - typically `url.path`, `http.request.method`, `server.address`, `db.system.name`, `db.operation.name`, `rpc.service` |
-| `targetingKey`                 | the **trace id** (32 hex digits), so `fractional` buckets a whole trace the same way in every service |
-| Live, per process              | `otelfeature.http.server.error_rate` - see [Error rate](#error-rate-in-the-context). The whole `otelfeature.*` namespace is reserved: start attributes in it are dropped |
+| Span at start                  | `span.kind` (lower case: `server`, `client`, ...), `span.name`, and every attribute the span starts with, typically `url.path`, `http.request.method`, `server.address`, `db.system.name`, `db.operation.name`, `rpc.service` |
+| `targetingKey`                 | the **trace id** (32 hex digits) |
+| Per process                    | `otelfeature.http.server.error_rate`, see [Error rate](#error-rate-in-the-context) |
 
-```json
-"targeting": {
-  "if": [
-    { "and": [
-      { "==": [ { "var": "service.name" }, "weather" ] },
-      { "==": [ { "var": "span.kind" }, "server" ] },
-      { "==": [ { "var": "url.path" }, "/health" ] }
-    ] },
-    "off", "full"
-  ]
-}
-```
-
-- **Keys are nested by dot segment.** `service.name` is sent as
-  `{"service": {"name": ...}}`, because JsonLogic's `var` splits on `.` and a
-  flat dotted key never matches in any flagd evaluator
-  ([OTelFeature/poc#22](https://github.com/OTelFeature/poc/issues/22)). Rules
-  keep using the semconv name verbatim.
-- **A name that is both a leaf and a namespace** (a deprecated/replacement
-  pair such as `db.system` and `db.system.name`): the namespace wins and the
-  leaf is dropped, logged at `DEBUG`. Target the current name.
 - **Only what exists when the span starts.** `http.route` and
-  `http.response.status_code` are *not* available: the instrumentation sets
-  them later. Target `url.path` instead of the route.
-- **Extension keys win over start attributes.** A start attribute named
-  like a resource key or one of the keys above (`span.kind`,
-  `otel.scope.name`, ...) - or one that would turn such a key into a
-  namespace, like `span.kind.detail` - is dropped, logged at `DEBUG`.
-- **Root spans keep the trace id they were evaluated on.** For a span with no
-  parent, the trace id is generated before the flags are asked and handed to
-  the SDK, so `targetingKey` and the exported trace id are the same. This
-  needs the OpenTelemetry SDK's `TracerProvider` (which
-  `otelfeature-instrument` always installs); wrapped around any other
-  provider, roots are evaluated without a `targetingKey`, and `fractional`
-  then puts every root in the same bucket.
-- **Built only off the static path.** While every flag is static, no context
-  is built at all.
+  `http.response.status_code` are not available, because the
+  instrumentation sets them later. Target `url.path` instead of the route.
+- When a start attribute clashes with a key above, the key wins. When
+  `db.system` and `db.system.name` both exist, the namespace wins.
+  Attributes in the reserved `otelfeature.*` namespace are dropped.
+- For a root span the trace id is generated before evaluation and kept by
+  the span, so `targetingKey` matches the exported trace id. This needs the
+  SDK's `TracerProvider`, which the launcher installs.
 
-Rough per-span cost (one `SERVER` span with two attributes and one `INTERNAL`
-child, no export; Python 3.12, a laptop Intel CPU - orders of magnitude, not
-a benchmark; reproduce with `uv run python benchmarks/span_cost.py`):
+The full contract is in the spec:
+[evaluation-context contract](https://github.com/OTelFeature/poc/blob/main/docs/spec/entity_model.md#evaluation-context-contract).
+
+### Decision cost
+
+A flag without `targeting` (flagd reason `STATIC`) or a missing flag is
+evaluated once and answered from memory until the ruleset changes. A flag
+with targeting is evaluated per span. Adding or removing targeting switches
+between the two, with no restart.
+
+Rough per-span cost, from `uv run python benchmarks/span_cost.py` (one
+`SERVER` span with two attributes and one `INTERNAL` child, no export;
+Python 3.12, a laptop Intel CPU; orders of magnitude, not a benchmark):
 
 | Setup                                         | per span |
 |-----------------------------------------------|----------|
@@ -426,13 +221,11 @@ a benchmark; reproduce with `uv run python benchmarks/span_cost.py`):
 | OTelFeature, flags static (cached policy)     | ~26 µs   |
 | OTelFeature, `telemetryLevel` targeted (FILE/in-process flagd) | ~75-105 µs |
 
-Targeting costs one in-process flag evaluation per span, so it belongs on a
-flag while it is being used, not left on permanently.
+Use targeting while you need it, not permanently.
 
 ### Muting an instrumentation, once per tracer
 
-"The jdbc/httpx instrumentation is flooding us, mute it now" is a targeting
-rule on the instrumentation scope:
+To mute one instrumentation, target its scope:
 
 ```json
 "telemetryLevel": {
@@ -444,97 +237,73 @@ rule on the instrumentation scope:
 }
 ```
 
-A rule that reads **only resource and scope keys** (`service.*`,
-`deployment.environment.name`, `telemetry.sdk.language`,
-`otel.scope.name`, `otel.scope.version`) - and only ones the tracer actually
-has - has the same answer for every span of a tracer, so it is evaluated
-**once per tracer**, not per span, and kept until the next provider event (a
-ruleset change re-decides every tracer). A
-muted instrumentation then costs nothing per span: its spans are never
-created. The same holds for `traceSampleRatio` by `service.name`.
-
-To tell, the extension reads the rule itself from flagd's in-process
-evaluator and lists the keys it can read. Anything else - a span-level key
-(`span.kind`, `url.path`, ...), `targetingKey` (including `fractional`
-without an explicit bucketing key), `otelfeature.*`, `$flagd.timestamp`, a
-computed `var` path or `fractional` bucketing expression, a key the
-resource doesn't carry (a span attribute could supply it), or a provider
-other than flagd in-process/file - keeps per-span evaluation, exactly as
-before. So does anything outside the extension that adds to the evaluation
-context: a global evaluation context, a transaction context propagator, or
-API-level hooks.
+A rule that reads only resource and scope keys (`service.*`,
+`deployment.environment.name`, `telemetry.sdk.language`, `otel.scope.*`),
+and only ones the tracer has, is evaluated **once per tracer** and kept
+until the next ruleset change. The muted instrumentation's spans are then
+never created, at no per-span cost. The same holds for `traceSampleRatio`
+by `service.name`. Per-span evaluation stays for any other key (span keys,
+`targetingKey`, also via `fractional` without a bucketing key,
+`otelfeature.*`, `$flagd.timestamp`, computed paths), for providers other
+than flagd in-process or file, and when anything else adds to the
+evaluation context (a global context, a transaction context propagator,
+API-level hooks).
 
 This is scope filtering, not `OTEL_INSTRUMENTATION_*_ENABLED`: the
-instrumentation is still installed and still runs its hooks; only its spans
-are never started.
+instrumentation stays installed and runs its hooks; only its spans are not
+started.
 
-**Finding the scope name.** It is the instrumentation package's module,
-e.g. `opentelemetry.instrumentation.fastapi` for FastAPI server spans. Any
-exported span shows it as its instrumentation scope (`otel.scope.name` /
-"library name" in most backends). Or run once with DEBUG logging for
-`otelfeature_instrument`, which logs every scope a tracer is created for:
+The scope name is the instrumentation's module, e.g.
+`opentelemetry.instrumentation.fastapi`. Exported spans show it as their
+instrumentation scope. DEBUG logging for `otelfeature_instrument` logs every
+scope a tracer is created for:
 
 ```python
-logging.basicConfig()
 logging.getLogger("otelfeature_instrument").setLevel(logging.DEBUG)
 # otelfeature-instrument: tracer for otel.scope.name='opentelemetry.instrumentation.fastapi' ...
 ```
 
 ### Error rate in the context
 
-`otelfeature.http.server.error_rate` (a number, 0.0-1.0) is the service's
-HTTP server error rate over the last collection interval, so a flagd rule
-can close the loop on its own - no outside script, no new metric:
+`otelfeature.http.server.error_rate` (0.0-1.0) is the service's HTTP server
+error rate over the last collection interval. A `traceSampleRatio` rule
+such as `{ ">": [ { "var": "otelfeature.http.server.error_rate" }, 0.05 ] }`
+can raise sampling when errors go up.
 
-```json
-"traceSampleRatio": {
-  "state": "ENABLED", "defaultVariant": "low",
-  "variants": { "low": 0.1, "all": 1.0 },
-  "targeting": { "if": [
-    { ">": [ { "var": "otelfeature.http.server.error_rate" }, 0.05 ] }, "all", "low"
-  ] }
-}
-```
+- It is computed from the `http.server.request.duration` metric, not from
+  spans, so lower sampling doesn't hide errors: requests with `error.type` /
+  all requests, every `OTELFEATURE_ERROR_RATE_INTERVAL` seconds (default
+  `10`), no smoothing. OTLP export is unchanged.
+- **It lags.** A rule sees the previous interval, so it reacts one to two
+  intervals after errors start.
+- **Minimum requests.** Below `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` (default
+  `10`) requests in an interval, the key is left out and a rule on it sees
+  `null`. A service with fewer requests than that (under 1 req/s at the
+  defaults) never gets a rate, even in a total outage. For quiet services,
+  lower the minimum or lengthen the interval.
+- Each process publishes its own rate. With `OTEL_METRICS_EXPORTER=none`
+  there is no rate. The key is only in the contexts the extension builds for
+  span decisions, not in the application's own evaluations.
 
-- **Input:** the `http.server.request.duration` histogram the HTTP server
-  instrumentation already records - not spans, because a sampled-out span
-  never records a status, while metrics are recorded whatever the sampling
-  does. Turning sampling down does not blind the loop.
-- **How:** an extra in-process reader with *delta* temporality sits next to
-  the OTLP reader and is collected every `OTELFEATURE_ERROR_RATE_INTERVAL`
-  seconds (default `10`). Each collection is its own window:
-  `requests with error.type / all requests`. No smoothing. The OTLP reader,
-  its temporality and what it exports are unchanged.
-- **Too few requests in the interval:** below
-  `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` (default `10`) the key is left out
-  of the context - a rule comparing it then sees `null`, which is not
-  `> 0.05`. One failure in one request can't publish `1.0` and flip the
-  loop. The flip side: a service seeing fewer requests than that per
-  interval (under 1 req/s at the defaults) never gets a rate, even in a
-  total outage - lower the minimum or lengthen the interval for quiet
-  services.
-- **Per service:** each process measures and publishes its own rate, so a
-  rule raises sampling for the service whose errors went up.
-- **Lags:** the rate a rule sees describes the *previous* interval, so it
-  reacts one to two intervals after errors start.
-- **Metrics off, no rate:** with `OTEL_METRICS_EXPORTER=none` no meter
-  provider is installed - no metrics SDK, so no error-rate reader either.
-  The key is then always absent and rules on it never match.
-- **Span-start contexts only:** the key is merged into the contexts the
-  extension builds for span decisions, not into OpenFeature evaluations the
-  application makes itself.
+> **Set `OTEL_SEMCONV_STABILITY_OPT_IN=http`.** Only then do the Python HTTP
+> instrumentations emit `http.server.request.duration` with `error.type`.
+> Without it the rate counts `http.status_code >= 500` from the older
+> `http.server.duration`. With `http/dup` only the stable metric is counted.
+> An unhandled exception in a bare ASGI app has neither and is not counted;
+> FastAPI/Starlette turn it into a `500` first. The launcher doesn't set the
+> opt-in, because it renames metrics and attributes your dashboards use.
 
-> **Set `OTEL_SEMCONV_STABILITY_OPT_IN=http`.** The Python HTTP
-> instrumentations only emit `http.server.request.duration` (with
-> `error.type`) with the stable HTTP semantic conventions opted in.
-> Without it they emit the older `http.server.duration`, which has no
-> `error.type`; the rate then falls back to counting
-> `http.status_code >= 500`. With `http/dup` both metrics are emitted; only
-> the stable one is counted. Either way an unhandled exception in a bare
-> ASGI app is recorded with neither `error.type` nor a status code and is not
-> counted - frameworks such as FastAPI/Starlette turn it into a `500` first,
-> so it is. `otelfeature-instrument` does not set the opt-in itself,
-> because it also renames the metrics and attributes your dashboards see.
+### Flag evaluations as span events (opt-in)
+
+The extension writes nothing about its decisions onto spans. For debugging
+a rule, `OTELFEATURE_OPENFEATURE_TRACING_HOOK=true` (install
+`otelfeature-instrument[tracing-hook]`) records the extension's own
+evaluations through the
+[OpenFeature OpenTelemetry hook](https://github.com/open-feature/python-sdk-contrib/tree/main/hooks/openfeature-hooks-opentelemetry)
+as `feature_flag.evaluation` events. It is off by default: every
+non-cached evaluation adds an event. The events land on the span current at
+evaluation time, i.e. the **parent** of the span being decided; decisions
+for new roots, including every `traceSampleRatio` decision, record nothing.
 
 ## Configuration
 
@@ -544,125 +313,75 @@ can close the loop on its own - no outside script, no new metric:
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | -          | OTLP/HTTP collector endpoint for traces and metrics              |
 | `FLAGD_HOST`                  | `localhost`| flagd host                                                       |
 | `FLAGD_PORT`                  | `8015`     | flagd gRPC sync port (in-process resolver)                       |
-| `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | flagd key of the selective-drop flag |
-| `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `flagd` to auto-register a flagd provider, `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
-| `OTEL_SDK_DISABLED`           | `false`    | Standard OTel switch; `true` is a hard floor for `TelemetryPolicy.enabled` that no flag overrides |
-| `OTELFEATURE_OPENFEATURE_TRACING_HOOK` | `false` | `true` records the extension's own flag evaluations as span events (needs the `tracing-hook` extra; adds an event per targeted evaluation) |
-| `OTEL_TRACES_EXPORTER`        | `otlp`     | `none` exports no spans. The tracer provider, flag policy and context propagation keep working (spans are still started - and recorded, so their CPU cost remains - and `traceparent` flows downstream, unless `OTEL_SDK_DISABLED=true`), as with the Java agent. Only `none` is recognised; any other value still exports via OTLP/HTTP |
-| `OTEL_METRICS_EXPORTER`       | `otlp`     | `none` installs no meter provider at all - and so no error rate. Only `none` is recognised; any other value still exports via OTLP/HTTP |
-| `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections (see [Error rate](#error-rate-in-the-context)) |
+| `OTELFEATURE_FLAG_PROVIDER`   | `flagd`    | `none` to manage OpenFeature yourself (see [flags.py](src/otelfeature_instrument/flags.py)) |
+| `OTELFEATURE_RECORD_SPAN_FLAG_NAME` | `recordSpan` | Key of the selective-drop flag |
+| `OTELFEATURE_ERROR_RATE_INTERVAL` | `10`  | Seconds between error-rate collections |
 | `OTELFEATURE_ERROR_RATE_MIN_REQUESTS` | `10` | Minimum requests per interval before an error rate is published |
-| `OTEL_SEMCONV_STABILITY_OPT_IN` | -       | Set to `http` so the HTTP instrumentation emits `http.server.request.duration` with `error.type` |
-| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Fallback ratio for `traceSampleRatio`; `always_off` is a hard floor no flag overrides; `parentbased_always_off` starts no trace locally but follows sampled parents (see [Sampling](#sampling-tracesampleratio)); the sampler is parent-based and custom samplers are not loaded |
+| `OTELFEATURE_OPENFEATURE_TRACING_HOOK` | `false` | `true` records the extension's own evaluations as span events (needs the `tracing-hook` extra) |
+| `OTEL_SDK_DISABLED`           | `false`    | `true` is a hard floor no flag overrides |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | Startup ratio for `traceSampleRatio`; `always_off` is a hard floor (see [Sampling](#sampling-tracesampleratio)) |
+| `OTEL_TRACES_EXPORTER`        | `otlp`     | `none` exports no spans; spans are still started and recorded, and `traceparent` still flows. Any other value exports via OTLP/HTTP |
+| `OTEL_METRICS_EXPORTER`       | `otlp`     | `none` installs no meter provider, and so no error rate. Any other value exports via OTLP/HTTP |
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | -       | Set to `http` for the error rate (see [above](#error-rate-in-the-context)) |
 
-The `telemetryLevel` (variants `FULL`/`IO`/`OFF`) and `otelEnabled` (boolean)
-flags should exist in whatever flagd instance `FLAGD_HOST`/`FLAGD_PORT` point
-at - a missing one simply falls back to its startup value. See
-[poc-otelfeature/src/flagd](https://github.com/OTelFeature/poc/tree/main/src/flagd)
-for an example flag definition.
-
-Which `OTEL_*` variables a flag can replace live, which cannot (and why), and
-the two hard floors are listed in the poc README:
-[Which `OTEL_*` env vars can be live flags](https://github.com/OTelFeature/poc#which-otel_-env-vars-can-be-live-flags).
+Which `OTEL_*` env vars can be live flags, and why the others can't,
+is in the spec:
+[`OTEL_*` env vars and live flags](https://github.com/OTelFeature/poc/blob/main/docs/spec/entity_model.md#otel_-env-vars-and-live-flags).
 
 ## Development
 
 Everything runs in the toolchain image built from
-[`ci/Dockerfile`](ci/Dockerfile) - Python, uv and every locked dependency.
-The only host requirement is Docker (on Windows: run `make` in WSL).
+[`ci/Dockerfile`](ci/Dockerfile). The only host requirement is Docker (on
+Windows: run `make` in WSL). CI runs the same image.
 
 ```sh
 make test    # build the image (cached), run the test suite in it
 make shell   # an interactive shell in the image, with the checkout mounted
 ```
 
-The checkout is mounted at `/workspace` and imported from `src/`, so edits
-need no rebuild; only changes to `pyproject.toml` / `uv.lock` rebuild the
-dependency layer. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
-builds the same image with GitHub Actions layer caching and runs the same
-`make test-only`, on every pull request and on `main`.
-
-- The container runs as root. `make test` writes nothing into the checkout,
-  but commands you run in `make shell` (e.g. a bare `pytest`, which leaves a
-  `.pytest_cache`) can leave root-owned files on a Linux filesystem.
+- The checkout is mounted and imported from `src/`, so edits need no
+  rebuild. The project itself isn't installed, so the
+  `otelfeature-instrument` command isn't available in `make shell`.
+- The container runs as root; commands in `make shell` can leave root-owned
+  files in the checkout.
 - Only Python 3.12 is tested, although `requires-python` is `>=3.10`.
-- The image doesn't install the project itself (tests import it from
-  `src/`), so the `otelfeature-instrument` console script isn't available in
-  `make shell`.
 
 ## Releases
 
-Releases are [GitHub Releases](https://github.com/OTelFeature/otelfeature-instrument/releases)
-with the wheel and sdist attached; there is no PyPI package yet. A
-maintainer cuts one by pushing tags after the version bump is merged -
-an rc first, to rehearse the workflow:
-
-```sh
-git tag v0.3.0-rc.1 && git push origin v0.3.0-rc.1   # pre-release
-# check the pre-release and its two assets, then:
-git tag v0.3.0 && git push origin v0.3.0
-```
-
-An rc tag is always `v<pyproject version>-rc.N` - the same `0.3.0` as the
-release it precedes, so its artifacts are versioned `0.3.0` too. After the
-final release, check its generated notes: GitHub may compute them against
-the rc rather than the previous release.
-
-[`.github/workflows/release.yml`](.github/workflows/release.yml) then, in
-the toolchain image: checks the tag - exactly `v<version>`, or
-`v<version>-rc.N` for a pre-release - against `version` in `pyproject.toml`
-and `__version__` (and fails otherwise), runs the tests, builds with
-`uv build`, and creates the release with generated notes (a re-run
-re-uploads the assets). An rc is also the way to try unreleased code on the
-demo stage. Locally: `make dist` builds both artifacts into `dist/`,
-`make check-version TAG=v0.3.0` runs the tag check.
-
-To depend on a release, pin the git tag, e.g. with uv:
-
-```toml
-[tool.uv.sources]
-otelfeature-instrument = { git = "https://github.com/OTelFeature/otelfeature-instrument", tag = "v0.4.0" }
-```
+After the version bump is merged, a maintainer pushes `v<version>-rc.1`
+(a pre-release), checks it, then pushes `v<version>`.
+[`release.yml`](.github/workflows/release.yml) checks the tag against
+`version` in `pyproject.toml` and `__version__`, runs the tests, and
+attaches the wheel and sdist to a GitHub Release. Check the generated notes
+of a final release: GitHub may compute them against the rc. Locally,
+`make dist` builds into `dist/` and `make check-version TAG=v0.4.0` runs the
+tag check.
 
 ## Known limitations
 
 ### `OFF` leaves gaps in traces
 
-`OFF` and `otelEnabled=false` are kept for completeness, but they are known
-to produce incomplete traces. While tracing is suppressed, the tracer hands
-back the span that is already current instead of creating one. What
-downstream services see depends on whether a request arrived with a parent:
+While `OFF` or `otelEnabled=false`, trace context keeps propagating: the
+tracer hands back the current span instead of creating one. Services that
+still trace can therefore produce traces with gaps or missing parents:
 
-- **Request arrived with a `traceparent`:** the incoming context is still
-  forwarded. Downstream spans join the same trace but attach directly to
-  the upstream caller's span, so this service is a gap in the middle of
-  the trace.
-- **Request arrived without one** (this service is the entry point): there
-  is no current span, so no context is propagated. Every traced downstream
-  service starts its own root trace for each call, and one request shows up
-  as several unrelated traces.
-- **Flag flipped back on mid-request:** spans created after the flip
-  attach to whatever the suppressed span stood in for - the upstream caller,
-  or nothing. Without an incoming parent, every such span becomes its own
-  root trace.
-- **Flag flipped off mid-request:** spans already started finish and are
-  exported, but their children from after the flip are missing.
-
-In short: while `OFF`, this service's part of a trace is missing, and
-without an incoming parent the trace is also split downstream.
+- **Request with a `traceparent`:** downstream spans join the trace but
+  attach to the upstream caller's span, so this service is a gap.
+- **Request without one** (this service is the entry point): no context is
+  propagated, so each traced downstream call starts its own trace.
+- **Flag flipped mid-request:** after a flip back on, new spans attach to
+  whatever the suppressed span stood in for (without an incoming parent,
+  each becomes its own trace). After a flip off, spans already started are
+  exported but their later children are missing.
 
 ### Other limitations
 
-- `bootstrap.py` reaches into `opentelemetry.instrumentation.auto_instrumentation._load`,
-  a private module of `opentelemetry-instrumentation` - hence the exact
-  version pin in [pyproject.toml](pyproject.toml). A future
-  `opentelemetry-instrumentation` release could change or remove it.
-- The flag keys (`telemetryLevel`, `otelEnabled`, `traceSampleRatio`) and
-  variants (`FULL`/`IO`/`OFF`) are hardcoded for now, not yet configurable
-  per consuming application.
-- Only traces and metrics are bootstrapped (matching
-  [poc-otelfeature](https://github.com/OTelFeature/poc)'s current scope) -
-  no log correlation setup.
+- `bootstrap.py` uses a private module of `opentelemetry-instrumentation`
+  (`opentelemetry.instrumentation.auto_instrumentation._load`), hence the
+  exact version pin in [pyproject.toml](pyproject.toml).
+- The flag keys `telemetryLevel`, `otelEnabled` and `traceSampleRatio` and
+  the variants `FULL`/`IO`/`OFF` are not configurable.
+- Only traces and metrics are set up; no logs.
 
 ## Talk to us
 
