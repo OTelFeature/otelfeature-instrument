@@ -4,6 +4,12 @@ A zero-code OpenTelemetry launcher, like `opentelemetry-instrument`, but with
 one addition: **`INTERNAL` spans - or all tracing - can be suppressed live,
 via a feature flag, with no application restart.**
 
+> From the KubeCon + CloudNativeCon North America 2026 talk
+> **OpenFeature as a Control Plane for OpenTelemetry** by Simon Schrottner
+> ([Flagsmith](https://www.flagsmith.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)) and Juliano Costa
+> ([Dash0](https://www.dash0.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)). Slides, recording and how to
+> reach us: **[otelfeature.github.io/presentation](https://otelfeature.github.io/presentation/)**
+
 ```sh
 otelfeature-instrument uvicorn main:app --host 0.0.0.0 --port 8000
 ```
@@ -656,3 +662,13 @@ without an incoming parent the trace is also split downstream.
 - Only traces and metrics are bootstrapped (matching
   [poc-otelfeature](https://github.com/OTelFeature/poc)'s current scope) -
   no log correlation setup.
+
+## Talk to us
+
+This is a prototype with open questions, and we'd like to hear how it
+fits your setup:
+
+- [Open an issue](https://github.com/OTelFeature/otelfeature-instrument/issues/new)
+- CNCF Slack ([invite](https://slack.cncf.io)): `#openfeature` and `#opentelemetry`
+- [Simon Schrottner](https://schrottner.at) ([Flagsmith](https://www.flagsmith.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)) and
+  [Juliano Costa](https://jcosta.dev) ([Dash0](https://www.dash0.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument))
