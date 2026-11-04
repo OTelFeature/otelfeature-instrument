@@ -38,6 +38,13 @@ Suppressed spans' children reattach to the real parent instead of being
 orphaned. See [How it works](#how-it-works) for why that's not simply a
 `Sampler`.
 
+> From the KubeCon + CloudNativeCon North America 2026 talk
+> **OpenFeature as a Control Plane for OpenTelemetry** by Simon Schrottner
+> ([Flagsmith](https://www.flagsmith.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)) and Juliano Costa
+> ([Dash0](https://www.dash0.com/?utm_source=github&utm_medium=readme&utm_campaign=otelfeature&utm_content=otelfeature-instrument)). The talk page has how to
+> reach us, and the slides and recording once they're out:
+> **[otelfeature.github.io/presentation](https://otelfeature.github.io/presentation/)**
+
 ## Why this exists
 
 This started as a prototype directly inside one service (see
@@ -656,3 +663,13 @@ without an incoming parent the trace is also split downstream.
 - Only traces and metrics are bootstrapped (matching
   [poc-otelfeature](https://github.com/OTelFeature/poc)'s current scope) -
   no log correlation setup.
+
+## Talk to us
+
+This is a prototype with open questions, and we'd like to hear how it
+fits your setup:
+
+- [Open an issue](https://github.com/OTelFeature/otelfeature-instrument/issues/new)
+- CNCF Slack ([invite](https://slack.cncf.io)): `#openfeature` and `#opentelemetry`
+- The speakers' websites: [Simon Schrottner](https://schrottner.at) and
+  [Juliano Costa](https://jcosta.dev)
