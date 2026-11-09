@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 
 [[package]]
@@ -608,7 +608,7 @@ wheels = [
 
 [[package]]
 name = "openfeature-provider-flagd"
-version = "0.6.0"
+version = "0.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cachebox" },
@@ -618,9 +618,9 @@ dependencies = [
     { name = "protobuf" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/db/0e/92f85364eaf232e092e8ff7e5cab5526447fb405609c55bb1b7cba95363f/openfeature_provider_flagd-0.6.0.tar.gz", hash = "sha256:1a29f9a6b1946fe006989d3e5429a6fde3d3c76aa3afd46f9628c6eeff13bfce", size = 71842, upload-time = "2026-10-15T21:36:21.445Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/35/2f/df44deb9bce7121e5a2951054c6a48fd71b72981806d8d20e485c8622dde/openfeature_provider_flagd-0.6.1.tar.gz", hash = "sha256:f6a3f9b9873923f0ba8cae10248f3503e1f6929b5b60909f54677cdb8868f4b8", size = 73148, upload-time = "2026-10-22T20:57:55.282Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/e9/bba482134c3e3741fa010e35b66394d4f28de09c8e070fea7055ac54cca3/openfeature_provider_flagd-0.6.0-py3-none-any.whl", hash = "sha256:91cfec21e713d7136d33d3ece4ef32e5c3cc280f022ec509119df6e04bd9493a", size = 64501, upload-time = "2026-10-15T21:36:19.95Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/a2/4cb745c2561a7db18043ae020f719216aa38e07528e70d6436468efb64a8/openfeature_provider_flagd-0.6.1-py3-none-any.whl", hash = "sha256:51abf745af31fccc2029d093f87f5769af488c2634794cee935fc3594add8d52", size = 64915, upload-time = "2026-10-22T20:57:53.778Z" },
 ]
 
 [[package]]
@@ -786,7 +786,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "openfeature-hooks-opentelemetry", marker = "extra == 'tracing-hook'", specifier = "==0.3.1" },
-    { name = "openfeature-provider-flagd", specifier = "==0.6.0" },
+    { name = "openfeature-provider-flagd", specifier = "==0.6.1" },
     { name = "openfeature-sdk", specifier = "==0.10.0" },
     { name = "opentelemetry-api", specifier = "==1.45.1" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.45.1" },
@@ -798,7 +798,7 @@ provides-extras = ["tracing-hook"]
 [package.metadata.requires-dev]
 dev = [
     { name = "otelfeature-instrument", extras = ["tracing-hook"] },
-    { name = "pytest", specifier = "==9.1.1" },
+    { name = "pytest", specifier = "==9.2.0" },
 ]
 
 [[package]]
@@ -854,7 +854,7 @@ wheels = [
 
 [[package]]
 name = "pytest"
-version = "9.1.1"
+version = "9.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
@@ -865,9 +865,9 @@ dependencies = [
     { name = "pygments" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/79/42/bb4641652e58dedeac2ec51abc1f8cae4fee4ec63899a0999016229a0f2a/pytest-9.2.0.tar.gz", hash = "sha256:97c4f3b1f3c7414aa36465e09b8220f1d03627993bd51b1282e193753c80557b", size = 1797555, upload-time = "2026-10-27T21:30:20.728Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
+    { url = "https://files.pythonhosted.org/packages/51/39/1f5d8c8877a0fa327db959c19341d4be61660de1ab6b7391f9eb805bcd67/pytest-9.2.0-py3-none-any.whl", hash = "sha256:07acdcf88ec174f907dc01af70bf52d49b014bbab03faeeade31c96b18c2e588", size = 411776, upload-time = "2026-10-27T21:30:19.131Z" },
 ]
 
 [[package]]
